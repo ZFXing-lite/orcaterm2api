@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/ZFXing-lite/orcaterm2api/internal/config"
 	"github.com/ZFXing-lite/orcaterm2api/internal/keypool"
@@ -29,6 +30,8 @@ type Server struct {
 	tracker *metrics.Tracker
 	paths   *metrics.PathStats
 	mux     *http.ServeMux
+	pairMu  sync.Mutex
+	pairs   map[string]*pairSession
 }
 
 // New 创建服务。
@@ -41,6 +44,7 @@ func New(cfg *config.Config, pool *keypool.Pool, proxies *proxypool.Pool, tracke
 		tracker: tracker,
 		paths:   metrics.NewPathStats(),
 		mux:     http.NewServeMux(),
+		pairs:   map[string]*pairSession{},
 	}
 	s.routes()
 	return s

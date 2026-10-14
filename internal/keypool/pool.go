@@ -49,6 +49,7 @@ type Account struct {
 	LastError    string
 	TokenExpiresAt time.Time
 	TokenExpired   bool
+	CredKind       string // oauth | console
 }
 
 func accountID(cookie string) string {
@@ -153,7 +154,12 @@ func (p *Pool) SyncAccounts(cfgs []config.AccountConfig) {
 		if exp, ok := orca.TokenExpiry(cred.OT); ok {
 			a.TokenExpiresAt = exp
 			a.TokenExpired = time.Now().After(exp)
+		} else {
+			// 控制台态无 JWT 过期声明，显示为非过期，由探活/失败计数接管
+			a.TokenExpiresAt = time.Time{}
+			a.TokenExpired = false
 		}
+		a.CredKind = cred.Kind()
 	}
 	for id := range p.accounts {
 		if !seen[id] {
@@ -475,8 +481,14 @@ func (p *Pool) Snapshot() []map[string]any {
 			"fail":             a.FailCount,
 			"last_error":       a.LastError,
 			"cred_ready":       a.cred.Ready(),
-			"token_expires_at": a.TokenExpiresAt.Format(time.RFC3339),
-			"token_expired":    a.TokenExpired,
+			"cred_kind":        a.CredKind,
+			"token_expires_at": func() string {
+				if a.TokenExpiresAt.IsZero() {
+					return ""
+				}
+				return a.TokenExpiresAt.Format(time.RFC3339)
+			}(),
+			"token_expired": a.TokenExpired,
 		})
 	}
 	return out

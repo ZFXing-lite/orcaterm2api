@@ -1,6 +1,9 @@
 package server
 
 import (
+	"path/filepath"
+	"encoding/json"
+	"strings"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,7 +16,11 @@ import (
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	cfg := config.Defaults()
+	// Load 走真实落盘路径：Update/SyncAccounts 的写回在测试中同样生效
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "config.yaml"))
+	if err != nil {
+		t.Fatalf("测试配置初始化失败: %v", err)
+	}
 	pool := keypool.New(keypool.Options{FlushEvery: 0})
 	t.Cleanup(pool.Close)
 	proxies := proxypool.New("round-robin", 0, 0)
@@ -96,5 +103,139 @@ func TestMgmtRejectsQueryKey(t *testing.T) {
 	h.ServeHTTP(w, remote)
 	if w.Code != 401 {
 		t.Fatalf("携 query key 不应通过鉴权，应得到 401，得到 %d", w.Code)
+	}
+}
+
+// ---- 一次性配对码收号 ----
+
+// fakeUpstream 模拟 lightai 的 conversation/list 探活端点。
+func fakeUpstream(t *testing.T, authOK bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !authOK {
+			w.Write([]byte(`{"code":500,"message":"NEED_UIN_AND_SKEY"}`))
+			return
+		}
+		w.Write([]byte(`{"code":0,"data":[],"message":"OK"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func pairReq(t *testing.T, path, mgmtKey, body string) *http.Request {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest("POST", "/v0/management/api/"+path, nil)
+	} else {
+		req = httptest.NewRequest("POST", "/v0/management/api/"+path, strings.NewReader(body))
+	}
+	req.RemoteAddr = "127.0.0.1:51234"
+	if mgmtKey != "" {
+		req.Header.Set("X-Mgmt-Key", mgmtKey)
+	}
+	return req
+}
+
+// 全链路：生成码 → 书签消费 → 凭证实测 → 落盘进池。
+func TestPairFlowHappyPath(t *testing.T) {
+	s := newTestServer(t)
+	s.cfg.Update(func(c *config.Config) { c.RemoteManagement.SecretKey = "k" })
+	up := fakeUpstream(t, true)
+	s.cfg.Update(func(c *config.Config) { c.Upstream.BaseURL = up.URL })
+
+	// 无钥匙不能生成
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/code", "", ""))
+	if w.Code != 401 {
+		t.Fatalf("无钥匙生成码应 401, got %d", w.Code)
+	}
+	// 生成码
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/code", "k", ""))
+	if w.Code != 200 {
+		t.Fatalf("生成码失败: %d %s", w.Code, w.Body.String())
+	}
+	var gen struct{ Code, Bookmark string }
+	if err := json.Unmarshal(w.Body.Bytes(), &gen); err != nil || gen.Code == "" {
+		t.Fatalf("生成码响应异常: %s", w.Body.String())
+	}
+	if !strings.Contains(gen.Bookmark, gen.Code) || !strings.Contains(gen.Bookmark, "pair/consume") {
+		t.Fatalf("书签未嵌入码或端点: %s", gen.Bookmark)
+	}
+
+	// 消费：书签脚本不带管理钥匙（配对码即凭证），text/plain 身体装 JSON
+	cookie := `{"code":"` + gen.Code + `","cookie":"uin=o987654; skey=SKY; userId=111222333444"}`
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/consume", "", cookie))
+	if w.Code != 200 {
+		t.Fatalf("消费失败: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"kind":"console"`) {
+		t.Fatalf("应识别控制台态: %s", w.Body.String())
+	}
+	// CORS 头
+	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatal("消费端点应带 CORS 头")
+	}
+	// 账号进池
+	if snap := s.pool.Snapshot(); len(snap) != 1 || snap[0]["cred_kind"] != "console" {
+		t.Fatalf("账号未落盘: %+v", snap)
+	}
+
+	// 一次性：同码二次消费应 410
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/consume", "", cookie))
+	if w.Code != 410 {
+		t.Fatalf("码应一次性, got %d", w.Code)
+	}
+	// 未知码
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/consume", "", `{"code":"ORCA-DEADBEEF","cookie":"uin=o1; skey=s"}`))
+	if w.Code != 410 {
+		t.Fatalf("未知码应 410, got %d", w.Code)
+	}
+	// 坏凭证（无 uin/skey/ot_session）不落盘
+	w = httptest.NewRecorder()
+	s2 := newTestServer(t)
+	_ = s2
+	// 重生成一个码测坏 cookie
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/code", "k", ""))
+	var gen2 struct{ Code string }
+	json.Unmarshal(w.Body.Bytes(), &gen2)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/consume", "", `{"code":"`+gen2.Code+`","cookie":"language=zh; other=x"}`))
+	if w.Code != 400 {
+		t.Fatalf("无登录态 cookie 应 400, got %d", w.Code)
+	}
+}
+
+// 探活失败（票据失效）拒绝落盘。
+func TestPairProbeFailRejects(t *testing.T) {
+	s := newTestServer(t)
+	s.cfg.Update(func(c *config.Config) { c.RemoteManagement.SecretKey = "k" })
+	up := fakeUpstream(t, false) // 上游回 NEED_UIN_AND_SKEY
+	s.cfg.Update(func(c *config.Config) { c.Upstream.BaseURL = up.URL })
+
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/code", "k", ""))
+	var gen struct{ Code string }
+	json.Unmarshal(w.Body.Bytes(), &gen)
+
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/consume", "", `{"code":"`+gen.Code+`","cookie":"uin=o987654; skey=BAD"}`))
+	if w.Code != 400 {
+		t.Fatalf("坏票应拒收, got %d %s", w.Code, w.Body.String())
+	}
+	if snap := s.pool.Snapshot(); len(snap) != 0 {
+		t.Fatalf("坏票不应落盘: %+v", snap)
+	}
+	// 坏票消费后码已烧毁（防重放试票）
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, pairReq(t, "pair/consume", "", `{"code":"`+gen.Code+`","cookie":"uin=o987654; skey=BAD"}`))
+	if w.Code != 410 {
+		t.Fatalf("码应已消费, got %d", w.Code)
 	}
 }

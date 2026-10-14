@@ -41,20 +41,40 @@ const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 // CodeAuthExpired 上游 AccessToken 失效的业务码。
 const CodeAuthExpired = 10050000
 
-// Credential 一个 OrcaTerm 登录态。
+// Credential 一个 OrcaTerm 登录态，支持两种形态：
+//   - OAuth 桌面态：ot_session JWT（Bearer 鉴权）
+//   - 控制台态：cloud.tencent.com 的 uin/skey cookie（直接重放，抓包实证可用）
 type Credential struct {
-	SID    string // ligai 域 sid cookie
+	SID    string // ligai 域 sid cookie（可选，API 会话层，缺失时上游自动发放）
 	OT     string // ot_session JWT（Bearer）
-	UserID string // ot_session JWT 中 userId 声明
+	UserID string // userId：桌面态从 JWT 解析，控制台态从 cookie 提取
+	Uin    string // 控制台态 uin（腾讯云账号标识）
+	Skey   string // 控制台态 skey（登录票据）
+	Raw    string // 原始 cookie 串（控制台态保真重放）
 }
 
-// Ready 登录态是否完整。
-func (c Credential) Ready() bool { return c.SID != "" && c.OT != "" }
+// Kind 凭证形态："oauth" | "console" | ""（无效）。
+func (c Credential) Kind() string {
+	switch {
+	case c.OT != "":
+		return "oauth"
+	case c.Uin != "" && c.Skey != "":
+		return "console"
+	default:
+		return ""
+	}
+}
 
-// ParseCookie 从原始 Cookie 字符串解析出 ot_session 与 sid。
+// Ready 登录态是否可用（OAuth 态认 ot_session；控制台态认 uin+skey）。
+func (c Credential) Ready() bool { return c.Kind() != "" }
+
+// ParseCookie 从原始 Cookie 字符串解析登录态。
+// 支持桌面客户端 .cookies 复制的 ot_session/sid 形态，
+// 也支持浏览器 document.cookie 复制的 uin/skey/userId 控制台态。
 func ParseCookie(raw string) Credential {
 	var c Credential
-	for _, part := range strings.Split(raw, ";") {
+	c.Raw = strings.TrimSpace(strings.Join(strings.Fields(raw), " "))
+	for _, part := range strings.Split(c.Raw, ";") {
 		part = strings.TrimSpace(part)
 		kv := strings.SplitN(part, "=", 2)
 		if len(kv) != 2 {
@@ -68,6 +88,10 @@ func ParseCookie(raw string) Credential {
 			c.SID = v
 		case "userId":
 			c.UserID = v
+		case "uin":
+			c.Uin = v
+		case "skey":
+			c.Skey = v
 		}
 	}
 	if c.UserID == "" && c.OT != "" {
@@ -383,22 +407,84 @@ func (c *Client) Chat(ctx context.Context, cred Credential, req ChatRequest) (*O
 func (c *Client) setHeaders(r *http.Request, cred Credential) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "text/event-stream, application/json")
-	r.Header.Set("Authorization", "Bearer "+cred.OT)
-	parts := []string{"ot_session=" + cred.OT, "userAccountLoginMethod=oauth", "userAccountType=wechat"}
-	if cred.UserID != "" {
-		parts = append(parts, "userId="+cred.UserID)
+	switch cred.Kind() {
+	case "oauth":
+		// 桌面态：Bearer + ot_session cookie
+		r.Header.Set("Authorization", "Bearer "+cred.OT)
+		parts := []string{"ot_session=" + cred.OT, "userAccountLoginMethod=oauth", "userAccountType=wechat"}
+		if cred.UserID != "" {
+			parts = append(parts, "userId="+cred.UserID)
+		}
+		// sid 属于 ligai 域 cookie；有则带上
+		if cred.SID != "" {
+			parts = append(parts, "sid="+cred.SID)
+		}
+		r.Header.Set("Cookie", strings.Join(parts, "; "))
+	case "console":
+		// 控制台态：保真重放 uin/skey cookie 串（实测不带 ot_session/sid 亦可）
+		r.Header.Del("Authorization")
+		cookie := cred.Raw
+		if strings.TrimSpace(cookie) == "" {
+			cookie = "uin=" + cred.Uin + "; skey=" + cred.Skey
+		}
+		if cred.UserID != "" && !strings.Contains(cookie, "userId=") {
+			cookie += "; userId=" + cred.UserID
+		}
+		r.Header.Set("Cookie", cookie)
 	}
-	// sid 属于 ligai 域 cookie；有则带上
-	if cred.SID != "" {
-		parts = append(parts, "sid="+cred.SID)
-	}
-	r.Header.Set("Cookie", strings.Join(parts, "; "))
 	r.Header.Set("X-Product", c.Product)
 	r.Header.Set("X-Seq-Id", newUUID())
 	r.Header.Set("X-Csrfcode", "")
 	r.Header.Set("X-Referer", c.Origin+"/")
 	r.Header.Set("Origin", c.Origin)
 	r.Header.Set("User-Agent", c.UserAgent)
+}
+
+// Probe 轻量凭证体检：GET conversation/list 只读接口，code=0 即健康。
+// 用于配对收号落盘前验证，不产生会话残留。
+func (c *Client) Probe(ctx context.Context, cred Credential) error {
+	if !cred.Ready() {
+		return &AuthError{Code: 10050000, Message: "credential incomplete"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.BaseURL+"/assistant/conversation/list?offset=0&limit=1", nil)
+	if err != nil {
+		return err
+	}
+	c.setHeaders(req, cred)
+	probeClient := c.HTTP
+	if probeClient == nil {
+		probeClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	resp, err := probeClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("probe: http status %d", resp.StatusCode)
+	}
+	var env struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return fmt.Errorf("probe: bad json: %w", err)
+	}
+	if env.Code == 10050000 {
+		return &AuthError{Code: env.Code, Message: env.Message}
+	}
+	if env.Message == "NEED_UIN_AND_SKEY" || strings.Contains(env.Message, "NEED_UIN_AND_SKEY") {
+		return &AuthError{Code: 10050000, Message: env.Message}
+	}
+	if env.Code != 0 {
+		return fmt.Errorf("probe: code=%d message=%s", env.Code, env.Message)
+	}
+	return nil
 }
 
 func (c *Client) buildBody(req ChatRequest, userID string) ([]byte, error) {
@@ -495,6 +581,10 @@ func parseOutcome(raw []byte) (*Outcome, error) {
 	}
 	if int(resp.Code) == CodeAuthExpired {
 		return nil, &AuthError{Code: int(resp.Code), Message: resp.Message}
+	}
+	// 控制台态（uin/skey）票据失效时上游返回 code=500 + NEED_UIN_AND_SKEY，同为鉴权失效
+	if resp.Message == "NEED_UIN_AND_SKEY" || strings.Contains(resp.Message, "NEED_UIN_AND_SKEY") {
+		return nil, &AuthError{Code: CodeAuthExpired, Message: resp.Message}
 	}
 	if resp.Code != 0 {
 		return nil, &BusinessError{Code: int(resp.Code), Message: resp.Message}

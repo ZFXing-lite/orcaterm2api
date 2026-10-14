@@ -1,14 +1,19 @@
 package server
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ZFXing-lite/orcaterm2api/internal/config"
 	"github.com/ZFXing-lite/orcaterm2api/internal/keypool"
+	"github.com/ZFXing-lite/orcaterm2api/internal/orca"
 )
 
 // 管理 API：/v0/management/api/*（需面板密码，见 X-Mgmt-Key）。
@@ -19,9 +24,18 @@ func (s *Server) handleManagementAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v0/management/api/")
-	if path != "login" && !s.checkMgmtAuth(r) {
+	// pair/consume 由一次性配对码鉴权（书签脚本无管理密钥），豁免 X-Mgmt-Key
+	if path != "login" && path != "pair/consume" && !s.checkMgmtAuth(r) {
 		writeJSON(w, 401, map[string]string{"error": "管理鉴权失败（X-Mgmt-Key）"})
 		return
+	}
+	if path == "pair/consume" {
+		// 书签脚本跨域提交：允许任意来源，鉴权完全依赖一次性配对码
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 	switch {
 	case path == "login" && r.Method == http.MethodPost:
@@ -59,6 +73,10 @@ func (s *Server) handleManagementAPI(w http.ResponseWriter, r *http.Request) {
 		s.mgmtUpdateSettings(w, r)
 	case path == "usage" && r.Method == http.MethodGet:
 		writeJSON(w, 200, s.tracker.Snapshot())
+	case path == "pair/code" && r.Method == http.MethodPost:
+		s.mgmtCreatePairCode(w, r)
+	case path == "pair/consume" && r.Method == http.MethodPost:
+		s.mgmtPairConsume(w, r)
 	default:
 		writeJSON(w, 404, map[string]string{"error": "未知管理接口"})
 	}
@@ -431,4 +449,126 @@ func (s *Server) mgmtUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// ---- 一次性配对码收号（书签脚本 → 自动落盘）----
+
+// pairSession 一对一配对会话：码即凭证，一次性消费。
+type pairSession struct {
+	Code    string
+	Expires time.Time
+}
+
+const (
+	pairTTL      = 15 * time.Minute
+	pairMaxLive  = 64 // 未消费配对码上限，防滥用
+	pairProbeTTL = 15 * time.Second
+)
+
+// mgmtCreatePairCode 生成一次性配对码 + 配套书签脚本。
+func (s *Server) mgmtCreatePairCode(w http.ResponseWriter, r *http.Request) {
+	s.pairMu.Lock()
+	now := time.Now()
+	for k, v := range s.pairs {
+		if now.After(v.Expires) {
+			delete(s.pairs, k)
+		}
+	}
+	if len(s.pairs) >= pairMaxLive {
+		s.pairMu.Unlock()
+		writeJSON(w, 429, map[string]string{"error": "未消费配对码过多，请先完成或等待过期"})
+		return
+	}
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		s.pairMu.Unlock()
+		writeJSON(w, 500, map[string]string{"error": "随机数生成失败"})
+		return
+	}
+	code := "ORCA-" + strings.ToUpper(hex.EncodeToString(buf))
+	s.pairs[code] = &pairSession{Code: code, Expires: now.Add(pairTTL)}
+	s.pairMu.Unlock()
+
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	base := scheme + "://" + r.Host
+	writeJSON(w, 200, map[string]any{
+		"code":       code,
+		"expires_in": int(pairTTL.Seconds()),
+		"bookmark":   pairBookmarklet(base, code),
+		"hint":       "把书签拖到浏览器收藏栏，在已登录 OrcaTerm Web 版的页面点击即可自动收号",
+	})
+}
+
+// pairBookmarklet 生成书签脚本：读取当前页 document.cookie 并投递给配对端点。
+func pairBookmarklet(base, code string) string {
+	return "javascript:(function(){fetch('" + base + "/v0/management/api/pair/consume'," +
+		"{method:'POST',headers:{'Content-Type':'text/plain'}," +
+		"body:JSON.stringify({code:'" + code + "',cookie:document.cookie})})" +
+		".then(function(r){return r.text()}).then(function(t){alert(t)})" +
+		".catch(function(e){alert('发送失败: '+e)})})()"
+}
+
+// mgmtPairConsume 配对码收号：校验码 → 实测凭证 → 落盘进池。
+// 凭证无效不落盘，返回原因；码先消费后验证，天然防重放。
+func (s *Server) mgmtPairConsume(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code   string `json:"code"`
+		Cookie string `json:"cookie"`
+	}
+	data, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err := json.Unmarshal(data, &body); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "请求体错误"})
+		return
+	}
+	code := strings.TrimSpace(strings.ToUpper(body.Code))
+	s.pairMu.Lock()
+	sess, ok := s.pairs[code]
+	if ok {
+		delete(s.pairs, code) // 一次性消费，无论后续成败
+	}
+	s.pairMu.Unlock()
+	if !ok || time.Now().After(sess.Expires) {
+		writeJSON(w, 410, map[string]string{"error": "配对码无效或已过期，请回面板重新生成"})
+		return
+	}
+
+	cred := orca.ParseCookie(body.Cookie)
+	if !cred.Ready() {
+		writeJSON(w, 400, map[string]string{"error": "cookie 中没有可用登录态（需要 ot_session 或 uin+skey），请先登录 OrcaTerm Web 版"})
+		return
+	}
+
+	// 落盘前实测凭证，坏票直接拒收
+	snap := s.cfg.Snapshot()
+	client := orca.NewClient(snap.Upstream.BaseURL, snap.Upstream.Product, snap.Upstream.Origin, snap.Upstream.UserAgent, nil)
+	ctx, cancel := context.WithTimeout(r.Context(), pairProbeTTL)
+	defer cancel()
+	if err := client.Probe(ctx, cred); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "凭证实测失败，未入库: " + err.Error(), "kind": cred.Kind()})
+		return
+	}
+
+	name := "pair-" + cred.Kind()
+	if len(cred.UserID) >= 4 {
+		name += "-" + cred.UserID[len(cred.UserID)-4:]
+	}
+	err := s.cfg.Update(func(c *config.Config) {
+		for _, k := range c.Upstream.Keys {
+			if k.Cookie == body.Cookie {
+				return // 已存在（同 cookie 重复配对），不重复追加
+			}
+		}
+		c.Upstream.Keys = append(c.Upstream.Keys, config.AccountConfig{
+			Name: name, Cookie: body.Cookie, Weight: 1,
+		})
+	})
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	s.pool.SyncAccounts(s.cfg.Snapshot().Upstream.Keys)
+	writeJSON(w, 200, map[string]any{"ok": true, "kind": cred.Kind(), "name": name, "hint": "收号成功，回面板查看"})
 }

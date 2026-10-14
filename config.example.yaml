@@ -18,7 +18,12 @@ upstream:
   max-tool-rounds: 8                # 工具调用最大往返轮数
   keys:
     - name: "号1"
-      cookie: "ot_session=你的ot_session; sid=你的sid"  # 从 OrcaTerm 客户端复制
+      # 两种登录态任选：
+      # 1) 桌面端：ot_session=...; sid=...  （从 OrcaTerm 客户端 .cookies 或请求头复制）
+      # 2) 浏览器控制台态：uin=...; skey=...; userId=...  （登录过 OrcaTerm Web 版后，
+      #    浏览器 F12 控制台执行 copy(document.cookie) 即得；sid 可省略，上游自动发放）
+      # 推荐用管理面板的「一键收号（书签）」，收号前自动实测凭据有效性
+      cookie: "uin=你的uin; skey=你的skey; userId=你的userId"
       weight: 1
       proxy: ""                     # 该号专用 socks5 代理，"none"=强制直连，空=跟随代理池
 

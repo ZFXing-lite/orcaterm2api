@@ -12,6 +12,7 @@
 
 - **Three downstream APIs**: OpenAI `/v1/chat/completions`, Anthropic `/v1/messages`, OpenAI Responses `/v1/responses`, all with SSE streaming
 - **Multi-account pool**: weighted-random picking, per-account in-flight caps, 429/5xx cooldowns, consecutive-failure circuit breaking (exponential backoff), auto-disable on auth expiry
+- **Dual credentials + one-click pairing**: desktop `ot_session` and browser-console `uin/skey` cookies mix in one pool; the panel issues single-use pairing codes with a bookmarklet — click it on any logged-in web page and the account lands in the pool (credentials probe-verified first)
 - **Cross-account retry**: per-request failover driven by `retry-on` status codes, upstream semantics preserved (a 429 is passed through as 429, never masked as 502)
 - **Session stickiness**: `X-Session-Id` (and friends) pins account + upstream conversation; multi-turn context never bounces accounts; `system` only applies to the first turn (upstream semantics)
 - **Closed-loop tool calls**: upstream `review` becomes OpenAI `tool_calls`; results are fed back into the same conversation in the exact format the OrcaTerm client uses
@@ -67,14 +68,27 @@ With no upstream accounts `/healthz` reports `ready: false`; it flips to `ready:
 
 ## Getting Account Cookies
 
-Each upstream account = one OrcaTerm login session. Copy the Cookie from a logged-in OrcaTerm client (must contain `ot_session` and `sid`):
+Each upstream account = one OrcaTerm login session. Two flavors are supported and can be mixed in one pool:
 
-- **Desktop client**: open DevTools → Network → find the `assistant/chat` request → copy the `Cookie` request header
-- **Local file**: `%LOCALAPPDATA%\com.orcaterm-desktop.app\.cookies` (Windows)
+| Flavor | Key cookie fields | How to get |
+|---|---|---|
+| Desktop (OAuth) | `ot_session` (JWT, `sid` optional) | Desktop client DevTools → Network → `assistant/chat` request header; or `%LOCALAPPDATA%\com.orcaterm-desktop.app\.cookies` |
+| Browser console | `uin` + `skey` + `userId` | Log in to the [OrcaTerm web app](https://orcaterm.cloud.tencent.com), then run `copy(document.cookie)` in the F12 console |
 
-Paste into the panel's "Accounts" page; bulk import is supported (one `name----cookie` per line). The gateway parses `userId` and the expiry time from the `ot_session` JWT automatically.
+- The gateway picks the auth style per credential automatically (`Bearer ot_session` or cookie replay).
+- Console cookies have no standalone expiry; when they go stale the upstream returns `NEED_UIN_AND_SKEY`, which is handled exactly like the desktop `code=10050000`: auto-disable + failover to another account.
 
-> The upstream has no refresh endpoint; re-copy the cookie when it expires. On expiry the upstream returns `code=10050000`, the gateway disables the account (re-enable in the panel) and marks it red.
+### One-click pairing (bookmarklet, recommended)
+
+Panel → "Accounts" → **one-click pairing** → get a pairing code plus a bookmarklet → drag the bookmarklet into your browser's bookmarks bar → click it on any page where you are logged in to the OrcaTerm web app, and the login state is delivered to the gateway automatically:
+
+- Before persisting, the gateway validates the credential against the upstream read-only API; bad cookies are rejected with the reason
+- Pairing codes are single-use and valid for 15 minutes; the consume endpoint authenticates by pairing code alone (no admin key needed)
+- Local deployments (`http://127.0.0.1:*`) work out of the box; remote deployments should put https in front of the gateway (browsers allow https pages to call localhost, but block cross-origin plain http)
+
+Paste into the panel's "Accounts" page; bulk import is supported (one `name----cookie` per line).
+
+> The upstream has no refresh endpoint; re-pair when the login expires.
 
 ## Client Integration
 
@@ -199,6 +213,16 @@ go test -race ./...
 ```
 
 ## Changelog
+
+### v1.1.0
+
+**Dual credentials + one-click pairing**
+
+- The account pool accepts two login flavors: desktop `ot_session` (OAuth) and browser-console `uin/skey` cookies (log in to the OrcaTerm web app and run `copy(document.cookie)`); both can be mixed in one pool
+- New "one-click pairing" in the panel: 15-minute single-use pairing codes with a ready-made bookmarklet; click the bookmark on any logged-in web page and the account lands in the pool automatically
+- Credentials are probe-verified against the upstream before persisting; invalid cookies are rejected with the reason; codes are consumed before verification, which makes replay impossible
+- Console-cookie expiry (`NEED_UIN_AND_SKEY`) is treated the same as desktop `code=10050000`: auto-disable + cross-account retry
+- The panel shows per-account credential kind (JWT expiry / console marker)
 
 ### v1.0.1
 

@@ -1,6 +1,7 @@
 package orca
 
 import (
+	"net/http"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -12,12 +13,36 @@ func TestParseCookie(t *testing.T) {
 	if c.OT != "AAA.BBB.CCC" || c.SID != "SID123" {
 		t.Errorf("got %+v", c)
 	}
-	if c.Ready() != true {
-		t.Error("应为 Ready")
+	if c.Kind() != "oauth" || !c.Ready() {
+		t.Errorf("桌面态应 Ready，kind=%q", c.Kind())
 	}
+	// sid 为可选 API 会话 cookie（上游自动发放），缺失不影响就绪
 	c2 := ParseCookie("ot_session=AAA;")
-	if c2.Ready() {
-		t.Error("缺 sid 不应 Ready")
+	if c2.Kind() != "oauth" || !c2.Ready() {
+		t.Errorf("缺 sid 的桌面态应 Ready，kind=%q", c2.Kind())
+	}
+}
+
+func TestParseCookieConsole(t *testing.T) {
+	c := ParseCookie("uin=o123456789001; skey=fake-skey-demo; userId=123456789012; userAccountType=txcloud; userAccountLoginMethod=console")
+	if c.Kind() != "console" || !c.Ready() {
+		t.Errorf("控制台态应 Ready，kind=%q", c.Kind())
+	}
+	if c.Uin != "o123456789001" || c.Skey != "fake-skey-demo" || c.UserID != "123456789012" {
+		t.Errorf("字段提取错误: %+v", c)
+	}
+	if c.Raw == "" || !strings.Contains(c.Raw, "skey=fake-skey-demo") {
+		t.Errorf("Raw 应保真存储原始串: %q", c.Raw)
+	}
+	// 只有 uin 没 skey → 不完整
+	c2 := ParseCookie("uin=o987654;")
+	if c2.Kind() != "" || c2.Ready() {
+		t.Errorf("缺 skey 不应 Ready，kind=%q", c2.Kind())
+	}
+	// 两种形态都没有 → 无效
+	c3 := ParseCookie("language=zh; other=x;")
+	if c3.Kind() != "" || c3.Ready() {
+		t.Error("无登录态 cookie 不应 Ready")
 	}
 }
 
@@ -97,5 +122,30 @@ func TestParseOutcome(t *testing.T) {
 	o, err = parseOutcome([]byte(`{"code":0,"data":{"action":"review","tool":{"type":"mcp","name":"fetch","args":{"url":"https://x"}}},"message":""}`))
 	if err != nil || !o.HasToolCall() || o.Tool.Name != "fetch" {
 		t.Errorf("got %+v, %v", o, err)
+	}
+}
+
+func TestSetHeadersByKind(t *testing.T) {
+	cl := NewClient("", "", "", "", nil)
+	// 桌面态：Bearer + ot_session cookie
+	req1, _ := http.NewRequest(http.MethodPost, cl.chatURL(), nil)
+	cred1 := ParseCookie("ot_session=AAA.BBB; sid=SID1; userId=123456")
+	cl.setHeaders(req1, cred1)
+	if got := req1.Header.Get("Authorization"); got != "Bearer AAA.BBB" {
+		t.Errorf("桌面态 Authorization=%q", got)
+	}
+	if ck := req1.Header.Get("Cookie"); !strings.Contains(ck, "ot_session=AAA.BBB") || !strings.Contains(ck, "sid=SID1") {
+		t.Errorf("桌面态 Cookie=%q", ck)
+	}
+	// 控制台态：无 Authorization，保真重放 Raw
+	req2, _ := http.NewRequest(http.MethodPost, cl.chatURL(), nil)
+	cred2 := ParseCookie("uin=o987654; skey=SKY; userId=123456789012")
+	cl.setHeaders(req2, cred2)
+	if got := req2.Header.Get("Authorization"); got != "" {
+		t.Errorf("控制台态不应带 Authorization, got %q", got)
+	}
+	ck := req2.Header.Get("Cookie")
+	if !strings.Contains(ck, "uin=o987654") || !strings.Contains(ck, "skey=SKY") || !strings.Contains(ck, "userId=123456789012") {
+		t.Errorf("控制台态 Cookie=%q", ck)
 	}
 }

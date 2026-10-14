@@ -12,6 +12,7 @@
 
 - **三套对外接口**：OpenAI `/v1/chat/completions`、Anthropic `/v1/messages`、OpenAI Responses `/v1/responses`，全部支持流式 SSE
 - **多账号池**：加权随机选号、单号在途上限、429/5xx 冷却、连续失败熔断（指数退避）、登录态失效自动停用
+- **双凭证 + 一键收号**：桌面端 `ot_session` 与浏览器控制台态 `uin/skey` 混池运行；面板生成一次性配对码与书签脚本，登录过 Web 版的页面点一下即自动收号（落盘前实测凭据）
 - **跨号重试**：单请求按 `retry-on` 状态码自动换号，上游语义保留（429 透传 429，不会伪装成 502）
 - **会话粘性**：`X-Session-Id` 等键固定「账号 + 上游会话」，多轮上下文不跳号，`system` 只在首轮生效
 - **工具调用闭环**：上游 `review` 转 OpenAI `tool_calls`，结果按 OrcaTerm 真机格式回填同一会话
@@ -67,14 +68,27 @@ ORCATERM2API_MGMT_KEY=你的面板密码 ./orcaterm2api -c config.yaml
 
 ## 获取账号 Cookie
 
-每个上游账号 = 一个 OrcaTerm 登录态。需要从已登录的 OrcaTerm 客户端复制 Cookie（必须包含 `ot_session` 与 `sid`）：
+每个上游账号 = 一个 OrcaTerm 登录态，**两种形态任选**：
 
-- **桌面客户端**：打开开发者工具 → Network → 找 `assistant/chat` 请求 → 复制请求头的 `Cookie`
-- **本地文件**：`%LOCALAPPDATA%\com.orcaterm-desktop.app\.cookies`（Windows）
+| 形态 | Cookie 关键字段 | 获取方式 |
+|---|---|---|
+| 桌面端（OAuth） | `ot_session`（JWT，`sid` 可选） | 桌面客户端开发者工具 → Network → `assistant/chat` 请求头；或 `%LOCALAPPDATA%\com.orcaterm-desktop.app\.cookies` |
+| 浏览器控制台态 | `uin` + `skey` + `userId` | 登录 [OrcaTerm Web 版](https://orcaterm.cloud.tencent.com)后，浏览器 F12 控制台执行 `copy(document.cookie)` |
 
-在面板「上游账号」页粘贴，支持批量导入（每行 `名称----cookie`）。网关会自动从 `ot_session`（JWT）解析 `userId` 与过期时间，过期前在面板可见。
+- 两种形态可混在一个账号池里跑，网关按凭证类型自动选择鉴权方式（`Bearer ot_session` 或 cookie 重放）。
+- 控制台态没有独立过期时间，随腾讯云登录失效；失效时上游返回 `NEED_UIN_AND_SKEY`，与桌面态 `code=10050000` 一样触发自动停用 + 换号重试。
 
-> 上游没有刷新接口，登录态过期后需重新复制 Cookie。过期时上游返回 `code=10050000`，网关会停用该账号（可在面板重新启用）并在面板标红。
+### 一键收号（书签，推荐）
+
+面板「上游账号」页 → **一键收号** → 生成配对码与配套书签 → 把书签拖进浏览器收藏栏 → 在任意已登录 OrcaTerm Web 版的页面点一下书签，登录态自动回传网关：
+
+- 落盘前网关会**先实测凭据有效性**（调上游只读接口），坏票直接拒收并返回原因
+- 配对码 15 分钟内一次性有效；收号端点以配对码为凭证，无需管理密钥
+- 本机部署（`http://127.0.0.1:*`）开箱即用；远程部署建议给网关上 https（浏览器允许 https 页面请求 localhost，拦截跨域 http）
+
+在面板「上游账号」页粘贴，支持批量导入（每行 `名称----cookie`）。
+
+> 上游没有刷新接口，登录态过期后重新收号即可。
 
 ## 客户端接入
 
@@ -201,6 +215,16 @@ go test -race ./...
 ```
 
 ## 更新日志
+
+### v1.1.0
+
+**双凭证 + 一键收号**
+
+- 账号池支持两种登录态：桌面端 `ot_session`（OAuth）与浏览器控制台态 `uin/skey`（登录 OrcaTerm Web 版后 F12 执行 `copy(document.cookie)` 即得），可混池运行
+- 管理面板新增「一键收号」：生成 15 分钟一次性配对码与配套书签脚本，在已登录 Web 版的页面点书签即自动收号落盘
+- 收号前网关先调上游只读接口实测凭据，坏票拒收不入库；配对码先消费后验证，天然防重放
+- 控制台态票据失效（上游返回 `NEED_UIN_AND_SKEY`）与桌面态 `code=10050000` 同等处理：自动停用 + 跨号重试
+- 面板账号列表按凭证形态显示（JWT 过期时间 / 控制台态标记）
 
 ### v1.0.1
 

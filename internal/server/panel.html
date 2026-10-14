@@ -120,19 +120,27 @@ async function renderAccounts() {
     <td>${a.weight}</td><td>${esc(a.proxy||'跟随池')}</td>
     <td>${a.in_flight}</td><td>${a.success}/${a.fail}</td>
     <td class="small">${esc(a.last_error||'-')}</td>
-    <td class="small">JWT 过期：${esc(a.token_expires_at||'-')}</td>
+    <td class="small">${a.cred_kind==='console'?'控制台态（随登录失效）':'JWT 过期：'+esc(a.token_expires_at||'-')}</td>
     <td style="white-space:nowrap">
       <button class="ghost" onclick="toggleAcct('${a.id}',${!a.disabled})">${a.disabled?'启用':'停用'}</button>
       <button class="danger" onclick="delAcct('${a.id}')">删除</button>
     </td></tr>`).join('');
   document.getElementById('content').innerHTML = `
   <div class="card"><h3>添加账号</h3>
-    <p class="small">从 OrcaTerm 客户端复制 Cookie（需包含 <span class="mono">ot_session</span> 与 <span class="mono">sid</span>）。桌面端一般可用开发者工具查看请求头，或从本地 cookies 文件复制。</p>
+    <p class="small">支持两种登录态：桌面端 Cookie（<span class="mono">ot_session=...</span>），或浏览器控制台态（<span class="mono">uin=...; skey=...</span>，在登录过 OrcaTerm Web 版的浏览器 F12 控制台跑 <span class="mono">copy(document.cookie)</span> 即得）。</p>
     <div class="row"><div><label>名称</label><input id="an" placeholder="号1"></div>
     <div><label>权重</label><input id="aw" type="number" value="1" min="1"></div>
     <div><label>专用代理（空=跟随池，none=直连）</label><input id="ap" placeholder="socks5://..."></div></div>
-    <div class="mt"><label>Cookie</label><textarea id="ac" placeholder="ot_session=...; sid=...; ..."></textarea></div>
+    <div class="mt"><label>Cookie</label><textarea id="ac" placeholder="ot_session=...; sid=...; ... 或 uin=...; skey=...; userId=..."></textarea></div>
     <div class="mt"><button class="primary" onclick="addAcct()">添加</button></div></div>
+  <div class="card"><h3>一键收号（书签自动落盘）</h3>
+    <p class="small">生成配对码后把书签拖进浏览器收藏栏，在任意登录过 OrcaTerm Web 版（orcaterm.cloud.tencent.com）的页面点一下书签，登录态自动回传入库——落盘前会先实测凭证有效性。码 15 分钟内一次性有效。</p>
+    <div class="mt"><button class="primary" onclick="genPair()">生成配对码与书签</button> <span class="small" id="pairMsg"></span></div>
+    <div class="mt" id="pairBox" style="display:none">
+      <p>配对码：<b class="mono" id="pairCode"></b>（15 分钟内一次性有效）</p>
+      <p>书签（拖到收藏栏）：<a id="pairLink" href="#" onclick="return false" style="word-break:break-all">一键收号书签</a>
+      <button class="ghost" onclick="copyText(document.getElementById('pairLink').href)">复制书签代码</button></p>
+    </div></div>
   <div class="card"><h3>批量导入 <span class="small">每行一个：<span class="mono">名称----cookie</span> 或只有 cookie</span></h3>
     <textarea id="imp" placeholder="号1----ot_session=...; sid=...\n号2----ot_session=...; sid=..."></textarea>
     <div class="mt"><button class="primary" onclick="importAcct()">导入</button> <span class="small" id="impMsg"></span></div></div>
@@ -149,6 +157,17 @@ async function importAcct() {
   try{ const j=await api('accounts/import',{method:'POST',body:JSON.stringify({text:document.getElementById('imp').value})});
     document.getElementById('impMsg').textContent=`新增 ${j.added}，跳过 ${j.skipped}`; renderAccounts(); }
   catch(e){ alert(e.message); }
+}
+async function genPair() {
+  try{ const j=await api('pair/code',{method:'POST'});
+    document.getElementById('pairCode').textContent=j.code;
+    document.getElementById('pairLink').href=j.bookmark;
+    document.getElementById('pairBox').style.display='';
+    document.getElementById('pairMsg').textContent=`${j.expires_in/60|0} 分钟内有效，收号成功后刷新账号池查看`;
+  }catch(e){ alert(e.message); }
+}
+function copyText(t) {
+  navigator.clipboard.writeText(t).then(()=>{},()=>{ const i=document.createElement('textarea'); i.value=t; document.body.appendChild(i); i.select(); document.execCommand('copy'); i.remove(); });
 }
 async function toggleAcct(id, disabled) {
   try{ await api(`accounts/${id}/toggle`,{method:'POST',body:JSON.stringify({disabled})}); renderAccounts(); }
