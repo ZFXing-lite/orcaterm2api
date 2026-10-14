@@ -1,0 +1,7 @@
+orcaterm2api
+orcaterm2api.exe
+config.yaml
+state/
+*.log
+*.tmp
+.DS_Store

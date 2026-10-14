@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orcaterm2api · 管理面板</title>
+<style>
+*{box-sizing:border-box}body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;background:#0f1420;color:#e8ecf4}
+header{background:#161d2e;padding:14px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #263}
+header h1{font-size:18px;margin:0}header .sub{color:#8b94a7;font-size:12px}
+nav{display:flex;gap:6px;padding:12px 20px;background:#131a2b;position:sticky;top:0;z-index:5;flex-wrap:wrap}
+nav button{background:#1d2740;color:#c6cede;border:1px solid #2c3a5c;padding:8px 14px;border-radius:8px;cursor:pointer}
+nav button.active{background:#2f6fed;border-color:#2f6fed;color:#fff}
+main{padding:20px;max-width:1200px;margin:0 auto}
+.card{background:#161d2e;border:1px solid #26314d;border-radius:12px;padding:16px;margin-bottom:16px}
+.card h3{margin:0 0 12px;font-size:15px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #232d47}
+th{color:#8b94a7;font-weight:500}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px}
+.ok{background:#123f2a;color:#4ade80}.bad{background:#4a1d1d;color:#f87171}.warn{background:#4a3a12;color:#fbbf24}.mut{background:#26314d;color:#8b94a7}
+input,textarea,select{background:#0f1420;border:1px solid #2c3a5c;color:#e8ecf4;border-radius:8px;padding:8px 10px;font-size:13px;width:100%}
+textarea{font-family:ui-monospace,monospace;min-height:90px}
+button.primary{background:#2f6fed;border:none;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer}
+button.danger{background:#b91c1c;border:none;color:#fff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px}
+button.ghost{background:#1d2740;border:1px solid #2c3a5c;color:#c6cede;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:200px}
+label{font-size:12px;color:#8b94a7;display:block;margin-bottom:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.stat{background:#1d2740;border-radius:10px;padding:14px}.stat .v{font-size:22px;font-weight:700}.stat .k{font-size:12px;color:#8b94a7}
+#login{max-width:380px;margin:80px auto}.hidden{display:none!important}
+.mono{font-family:ui-monospace,monospace;font-size:12px}
+.small{font-size:12px;color:#8b94a7}
+.mt{margin-top:10px}
+</style>
+</head>
+<body>
+<header><h1>🐋 orcaterm2api</h1><span class="sub">OrcaTerm AI 网关 · 管理面板</span><span style="margin-left:auto" id="readyBadge"></span></header>
+
+<div id="login" class="card">
+  <h3>登录</h3>
+  <p class="small">输入面板密码（remote-management.secret-key；未设置则直接进入）</p>
+  <input id="pwd" type="password" placeholder="面板密码" onkeydown="if(event.key==='Enter')doLogin()">
+  <div class="mt"><button class="primary" onclick="doLogin()">登录</button></div>
+  <p class="small" id="loginErr" style="color:#f87171"></p>
+</div>
+
+<div id="app" class="hidden">
+<nav id="tabs"></nav>
+<main id="content"></main>
+</div>
+
+<script>
+let MGMT_KEY = sessionStorage.getItem('orcaterm2api_key') || '';
+const TABS = [['overview','概览'],['accounts','上游账号'],['keys','下游密钥'],['proxies','代理池'],['paths','接口统计'],['usage','Token 用量'],['settings','网关设置']];
+let cur = 'overview';
+
+async function api(path, opts={}) {
+  opts.headers = Object.assign({'Content-Type':'application/json'}, opts.headers||{});
+  if (MGMT_KEY) opts.headers['X-Mgmt-Key'] = MGMT_KEY;
+  const r = await fetch('/v0/management/api/' + path, opts);
+  const j = await r.json().catch(()=>({}));
+  if (r.status === 401) { sessionStorage.removeItem('orcaterm2api_key'); location.reload(); throw new Error('鉴权失效'); }
+  if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+}
+async function doLogin() {
+  const pwd = document.getElementById('pwd').value;
+  try {
+    const j = await fetch('/v0/management/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key:pwd})}).then(r=>r.json());
+    if (!j.ok) { document.getElementById('loginErr').textContent = j.error || '登录失败'; return; }
+    MGMT_KEY = pwd; sessionStorage.setItem('orcaterm2api_key', pwd);
+    enter();
+  } catch(e){ document.getElementById('loginErr').textContent = e.message; }
+}
+function enter() {
+  document.getElementById('login').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  document.getElementById('tabs').innerHTML = TABS.map(([k,n])=>`<button data-t="${k}" onclick="go('${k}')">${n}</button>`).join('');
+  go('overview'); setInterval(()=>{ if(cur==='overview'||cur==='accounts') go(cur,true); }, 5000);
+}
+function go(t, silent) {
+  cur = t;
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.t===t));
+  ({overview:renderOverview,accounts:renderAccounts,keys:renderKeys,proxies:renderProxies,paths:renderPaths,usage:renderUsage,settings:renderSettings}[t])(silent);
+}
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const badge = (t,c) => `<span class="badge ${c}">${esc(t)}</span>`;
+
+// ---- 概览 ----
+async function renderOverview() {
+  const j = await api('overview');
+  document.getElementById('readyBadge').innerHTML = j.ready ? badge('运行中','ok') : badge('无可用账号','bad');
+  const u = j.usage.by_account || {}; let pt=0, ct=0, rq=0;
+  Object.values(u).forEach(x=>{pt+=x.prompt_tokens;ct+=x.completion_tokens;rq+=x.requests;});
+  document.getElementById('content').innerHTML = `
+  <div class="grid">
+    <div class="stat"><div class="v">${j.healthy}/${j.total}</div><div class="k">可用 / 总账号</div></div>
+    <div class="stat"><div class="v">${j.proxies}</div><div class="k">代理节点</div></div>
+    <div class="stat"><div class="v">${rq}</div><div class="k">总请求</div></div>
+    <div class="stat"><div class="v">${(pt+ct).toLocaleString()}</div><div class="k">总 Token（估算）</div></div>
+    <div class="stat"><div class="v">${esc(j.default_model)}</div><div class="k">默认模型${j.force_model?'（强制）':''}</div></div>
+    <div class="stat"><div class="v mono" style="font-size:13px">${esc(j.base_url)}</div><div class="k">上游地址</div></div>
+  </div>
+  <div class="card"><h3>接口调用</h3>${pathTable(j.paths)}</div>`;
+}
+function pathTable(paths) {
+  if(!paths || !paths.length) return '<p class="small">暂无数据</p>';
+  return `<table><tr><th>路径</th><th>请求</th><th>错误</th><th>进行中</th><th>最近状态码</th><th>最近错误</th></tr>` +
+    paths.map(p=>`<tr><td class="mono">${esc(p.path)}</td><td>${p.requests}</td><td>${p.errors}</td><td>${p.inflight}</td><td>${p.last_code||'-'}</td><td class="small">${esc(p.last_error||'')}</td></tr>`).join('') + `</table>`;
+}
+
+// ---- 账号 ----
+async function renderAccounts() {
+  const j = await api('accounts');
+  const rows = (j.accounts||[]).map(a=>`<tr>
+    <td>${esc(a.name||'(未命名)')}<br><span class="mono small">${a.id.slice(0,8)}</span></td>
+    <td>${a.disabled?badge('停用','bad'):a.cooling?badge('冷却 '+Math.round(a.cooldown_left_s)+'s','warn'):a.cred_ready?badge('正常','ok'):badge('凭证不全','bad')}
+      ${a.token_expired?'<br>'+badge('登录过期','bad'):''}<br><span class="small">${esc(a.cooldown_reason||a.disabled_reason||'')}</span></td>
+    <td>${a.weight}</td><td>${esc(a.proxy||'跟随池')}</td>
+    <td>${a.in_flight}</td><td>${a.success}/${a.fail}</td>
+    <td class="small">${esc(a.last_error||'-')}</td>
+    <td class="small">JWT 过期：${esc(a.token_expires_at||'-')}</td>
+    <td style="white-space:nowrap">
+      <button class="ghost" onclick="toggleAcct('${a.id}',${!a.disabled})">${a.disabled?'启用':'停用'}</button>
+      <button class="danger" onclick="delAcct('${a.id}')">删除</button>
+    </td></tr>`).join('');
+  document.getElementById('content').innerHTML = `
+  <div class="card"><h3>添加账号</h3>
+    <p class="small">从 OrcaTerm 客户端复制 Cookie（需包含 <span class="mono">ot_session</span> 与 <span class="mono">sid</span>）。桌面端一般可用开发者工具查看请求头，或从本地 cookies 文件复制。</p>
+    <div class="row"><div><label>名称</label><input id="an" placeholder="号1"></div>
+    <div><label>权重</label><input id="aw" type="number" value="1" min="1"></div>
+    <div><label>专用代理（空=跟随池，none=直连）</label><input id="ap" placeholder="socks5://..."></div></div>
+    <div class="mt"><label>Cookie</label><textarea id="ac" placeholder="ot_session=...; sid=...; ..."></textarea></div>
+    <div class="mt"><button class="primary" onclick="addAcct()">添加</button></div></div>
+  <div class="card"><h3>批量导入 <span class="small">每行一个：<span class="mono">名称----cookie</span> 或只有 cookie</span></h3>
+    <textarea id="imp" placeholder="号1----ot_session=...; sid=...\n号2----ot_session=...; sid=..."></textarea>
+    <div class="mt"><button class="primary" onclick="importAcct()">导入</button> <span class="small" id="impMsg"></span></div></div>
+  <div class="card"><h3>账号池（${(j.accounts||[]).length}）</h3>
+    <table><tr><th>账号</th><th>状态</th><th>权重</th><th>代理</th><th>在途</th><th>成功/失败</th><th>最近错误</th><th>凭证</th><th>操作</th></tr>${rows||'<tr><td colspan=9 class="small">暂无账号，先添加</td></tr>'}</table></div>`;
+}
+async function addAcct() {
+  const name=document.getElementById('an').value, cookie=document.getElementById('ac').value;
+  const weight=parseInt(document.getElementById('aw').value)||1, proxy=document.getElementById('ap').value;
+  try{ await api('accounts',{method:'POST',body:JSON.stringify({name,cookie,weight,proxy})}); renderAccounts(); }
+  catch(e){ alert(e.message); }
+}
+async function importAcct() {
+  try{ const j=await api('accounts/import',{method:'POST',body:JSON.stringify({text:document.getElementById('imp').value})});
+    document.getElementById('impMsg').textContent=`新增 ${j.added}，跳过 ${j.skipped}`; renderAccounts(); }
+  catch(e){ alert(e.message); }
+}
+async function toggleAcct(id, disabled) {
+  try{ await api(`accounts/${id}/toggle`,{method:'POST',body:JSON.stringify({disabled})}); renderAccounts(); }
+  catch(e){ alert(e.message); }
+}
+async function delAcct(id) {
+  if(!confirm('删除该账号？')) return;
+  try{ await api('accounts/'+id,{method:'DELETE'}); renderAccounts(); }catch(e){ alert(e.message); }
+}
+
+// ---- 下游密钥 ----
+async function renderKeys() {
+  const j = await api('keys');
+  document.getElementById('content').innerHTML = `
+  <div class="card"><h3>下游调用密钥 <span class="small">留空=网关开放访问；设置后客户端须带 Authorization: Bearer</span></h3>
+    <div class="row"><div><label>新密钥</label><input id="nk" placeholder="sk-..."></div>
+    <div style="flex:0;align-self:end"><button class="primary" onclick="addKey()">添加</button></div></div>
+    <table class="mt"><tr><th>#</th><th>预览</th><th>操作</th></tr>
+    ${(j.keys||[]).map(k=>`<tr><td>${k.index}</td><td class="mono">${esc(k.preview)}</td><td><button class="danger" onclick="delKey(${k.index})">删除</button></td></tr>`).join('')||'<tr><td colspan=3 class="small">未设置（开放访问）</td></tr>'}</table></div>`;
+}
+async function addKey(){ try{ await api('keys',{method:'POST',body:JSON.stringify({key:document.getElementById('nk').value})}); renderKeys(); }catch(e){alert(e.message);} }
+async function delKey(i){ if(!confirm('删除后立即失效，继续？'))return; try{ await api('keys/'+i,{method:'DELETE'}); renderKeys(); }catch(e){alert(e.message);} }
+
+// ---- 代理 ----
+async function renderProxies() {
+  const j = await api('proxies');
+  document.getElementById('content').innerHTML = `
+  <div class="card"><h3>代理池 <span class="small">按行粘贴 socks5:// 地址整池替换；留空保存=直连</span></h3>
+    <div class="row"><div><label>策略</label><select id="pp">
+      <option value="round-robin">round-robin</option><option value="random">random</option><option value="sticky-key">sticky-key</option></select></div></div>
+    <div class="mt"><label>节点（每行一个）</label><textarea id="pt" placeholder="socks5://user:pass@1.2.3.4:1080"></textarea></div>
+    <div class="mt"><button class="primary" onclick="saveProxies()">保存</button> <span class="small" id="pmsg"></span></div></div>
+  <div class="card"><h3>节点状态</h3><table><tr><th>地址</th><th>健康</th><th>成功</th><th>失败</th><th>最近错误</th></tr>
+    ${(j.proxies||[]).map(p=>`<tr><td class="mono">${esc(p.url)}</td><td>${p.healthy?badge('健康','ok'):badge('异常','bad')}</td><td>${p.success}</td><td>${p.fail}</td><td class="small">${esc(p.last_error||'')}</td></tr>`).join('')||'<tr><td colspan=5 class="small">直连模式</td></tr>'}</table></div>`;
+  document.getElementById('pp').value = j.policy || 'round-robin';
+}
+async function saveProxies(){
+  try{ const j=await api('proxies',{method:'POST',body:JSON.stringify({text:document.getElementById('pt').value, policy:document.getElementById('pp').value})});
+    document.getElementById('pmsg').textContent='已保存 '+j.count+' 个节点'; renderProxies(); }catch(e){alert(e.message);}
+}
+
+// ---- 接口统计 ----
+async function renderPaths(){ const j=await api('overview'); document.getElementById('content').innerHTML=`<div class="card"><h3>接口调用统计</h3>${pathTable(j.paths)}</div>`; }
+
+// ---- 用量 ----
+async function renderUsage(){
+  const j=await api('usage');
+  const rows = Object.entries(j.by_account||{}).map(([id,u])=>`<tr><td class="mono">${id.slice(0,8)}</td><td>${u.requests}</td><td>${u.prompt_tokens.toLocaleString()}</td><td>${u.completion_tokens.toLocaleString()}</td><td>${u.total_tokens.toLocaleString()}</td><td>${u.errors}</td></tr>`).join('');
+  const mrows = Object.entries(j.by_model||{}).map(([m,u])=>`<tr><td>${esc(m)}</td><td>${u.requests}</td><td>${u.total_tokens.toLocaleString()}</td></tr>`).join('');
+  document.getElementById('content').innerHTML=`
+  <div class="card"><h3>按账号 <span class="small">上游不返回真实 token，此处为本地估算，仅供参考</span></h3>
+  <table><tr><th>账号</th><th>请求</th><th>输入 token</th><th>输出 token</th><th>合计</th><th>错误</th></tr>${rows||'<tr><td colspan=6 class="small">暂无</td></tr>'}</table></div>
+  <div class="card"><h3>按模型</h3><table><tr><th>模型</th><th>请求</th><th>合计 token</th></tr>${mrows||'<tr><td colspan=3 class="small">暂无</td></tr>'}</table></div>`;
+}
+
+// ---- 设置 ----
+async function renderSettings(){
+  const j = await api('settings');
+  const f=(id,v)=>`<div><label>${id}</label><input id="s_${id}" value="${esc(v==null?'':v)}"></div>`;
+  const c=(id,v,label)=>`<div><label>${label||id}</label><select id="s_${id}"><option value="true"${v?' selected':''}>true</option><option value="false"${!v?' selected':''}>false</option></select></div>`;
+  document.getElementById('content').innerHTML=`
+  <div class="card"><h3>网关设置 <span class="small">保存后立即生效并回写 config.yaml</span></h3>
+  <div class="row">${f('base_url',j.base_url)}${f('default_model',j.default_model)}${f('timeout',j.timeout)}</div>
+  <div class="row mt">${c('force_model',j.force_model)}${c('allow_unknown',j.allow_unknown)}${c('hide_tools',j.hide_tools)}</div>
+  <div class="row mt">${f('max_tool_rounds',j.max_tool_rounds)}${f('proxy_policy',j.proxy_policy)}${f('max_in_flight',j.max_in_flight)}</div>
+  <div class="row mt">${f('cooldown_429',j.cooldown_429)}${f('cooldown_5xx',j.cooldown_5xx)}${f('max_retries',j.max_retries)}</div>
+  <div class="row mt">${f('session_ttl',j.session_ttl)}${c('allow_remote',j.allow_remote)}<div><label>面板密码（secret_key，留空=不修改）</label><input id="s_secret_key" type="password" placeholder="不修改"></div></div>
+  <div class="mt"><button class="primary" onclick="saveSettings()">保存</button> <span class="small" id="smsg"></span></div></div>`;
+}
+async function saveSettings(){
+  const g=id=>document.getElementById('s_'+id).value;
+  const b={base_url:g('base_url'),default_model:g('default_model'),timeout:g('timeout'),
+    force_model:g('force_model')==='true',allow_unknown:g('allow_unknown')==='true',hide_tools:g('hide_tools')==='true',
+    max_tool_rounds:parseInt(g('max_tool_rounds'))||8,proxy_policy:g('proxy_policy'),
+    max_in_flight:parseInt(g('max_in_flight'))||2,cooldown_429:g('cooldown_429'),cooldown_5xx:g('cooldown_5xx'),
+    max_retries:parseInt(g('max_retries'))||0,session_ttl:g('session_ttl'),allow_remote:g('allow_remote')==='true'};
+  const sk=document.getElementById('s_secret_key').value; if(sk) b.secret_key=sk;
+  try{ await api('settings',{method:'PUT',body:JSON.stringify(b)}); document.getElementById('smsg').textContent='已保存'; }
+  catch(e){ alert(e.message); }
+}
+
+// 自动登录（本地记住了面板密码时）
+(async()=>{ if(MGMT_KEY){ try{ const j=await fetch('/v0/management/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:MGMT_KEY})}).then(r=>r.json()); if(j.ok) enter(); }catch(e){} } })();
+</script>
+</body>
+</html>

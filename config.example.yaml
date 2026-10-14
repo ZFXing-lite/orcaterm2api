@@ -1,0 +1,53 @@
+# orcaterm2api 配置示例：复制为 config.yaml 后修改
+# 面板密码建议用环境变量 ORCATERM2API_MGMT_KEY 传入
+
+port: 8317
+
+api-keys: []                        # 留空=不校验；或填客户端访问本网关用的密钥
+
+upstream:
+  base-url: "https://lightai.cloud.tencent.com"
+  product: "orcaterm"
+  origin: "http://tauri.localhost"
+  user-agent: ""                    # 留空=使用内置 OrcaTerm 客户端 UA
+  default-model: "deepseek-v4-flash" # 18 个可用模型见 README
+  force-model: true                 # 把请求体的 model 改写为 default-model
+  allow-unknown-model: false        # 是否允许未知模型名直通上游
+  timeout: 300s
+  hide-tools: true                  # hideToolMessage 等三个上游开关
+  max-tool-rounds: 8                # 工具调用最大往返轮数
+  keys:
+    - name: "号1"
+      cookie: "ot_session=你的ot_session; sid=你的sid"  # 从 OrcaTerm 客户端复制
+      weight: 1
+      proxy: ""                     # 该号专用 socks5 代理，"none"=强制直连，空=跟随代理池
+
+proxy:
+  policy: "round-robin"             # round-robin | random | sticky-key
+  health-every: 30s
+  fail-cooldown: 30s
+  socks5: []                        # 如 - url: "socks5://user:pass@1.2.3.4:1080"
+
+rate-limit:
+  max-in-flight: 2                 # 单账号最大并发
+  cooldown-429: 60s                 # 上游没给 Retry-After 时用
+  cooldown-5xx: 30s
+  err-threshold: 3                 # 连续错误达到阈值后熔断
+  err-cooldown: 10m
+  disable-on-auth-error: true       # code=10050000（登录态失效）直接永久停用
+  max-retries: 3                   # 单请求跨号重试次数
+  retry-on: [429, 500, 502, 503, 504]
+  backoff: 1s                      # 退避基数，指数增长 ±25% 抖动
+
+sessions:
+  ttl: 30m                         # 会话粘性：X-Session-Id/user 固定账号时长
+  max: 1000
+
+remote-management:
+  allow-remote: false               # 是否允许远程访问管理面板；未设置密码时无论真假都仅限本地
+  secret-key: ""                   # 面板密码，务必设置（或用环境变量）
+
+metrics:
+  enabled: true
+  state-file: "state/state.json"
+  flush-every: 5s
