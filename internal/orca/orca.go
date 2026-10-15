@@ -38,6 +38,13 @@ const DefaultOrigin = "http://tauri.localhost"
 // DefaultUserAgent 真实客户端 UA（抓包取得）。
 const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) OrcaTerm/1.0.0 Chrome/120.0.0.0 Safari/537.36"
 
+// DefaultWebOrigin / DefaultWebUserAgent：OrcaTerm Web 版指纹（HAR 实测）。
+// 控制台态（uin/skey）票据来自浏览器，请求头须与 Web 版真实流量对齐，
+// 避免出现「控制台 cookie + 桌面 origin」这种真实世界不存在的组合。
+const DefaultWebOrigin = "https://orcaterm.cloud.tencent.com"
+
+const DefaultWebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+
 // CodeAuthExpired 上游 AccessToken 失效的业务码。
 const CodeAuthExpired = 10050000
 
@@ -329,6 +336,12 @@ type AuthError struct {
 
 func (e *AuthError) Error() string { return fmt.Sprintf("upstream auth expired (code=%d): %s", e.Code, e.Message) }
 
+// isConsoleAuthExpired 控制台态（uin/skey）票据失效的两种上游特征（实测）：
+// NEED_UIN_AND_SKEY（票据缺失）与 VERIFY_SKEY_UIN_FAILED（skey 过期/校验失败）。
+func isConsoleAuthExpired(msg string) bool {
+	return strings.Contains(msg, "NEED_UIN_AND_SKEY") || strings.Contains(msg, "VERIFY_SKEY_UIN_FAILED")
+}
+
 // ProtocolError 上游协议错误。
 type ProtocolError struct{ Msg string }
 
@@ -351,10 +364,14 @@ type Client struct {
 	Origin    string
 	UserAgent string
 	HTTP      *http.Client
+
+	// UA 是否为用户显式配置：控制台态仅在未配置时自动切 Web 版 UA
+	uaConfigured bool
 }
 
 // NewClient 创建上游客户端；httpClient 为 nil 时使用默认（由调用方注入代理）。
 func NewClient(baseURL, product, origin, userAgent string, httpClient *http.Client) *Client {
+	uaConfigured := userAgent != ""
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
@@ -370,7 +387,7 @@ func NewClient(baseURL, product, origin, userAgent string, httpClient *http.Clie
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 300 * time.Second}
 	}
-	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Product: product, Origin: origin, UserAgent: userAgent, HTTP: httpClient}
+	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Product: product, Origin: origin, UserAgent: userAgent, HTTP: httpClient, uaConfigured: uaConfigured}
 }
 
 // chatURL 真实客户端固定携带的查询参数。
@@ -405,11 +422,19 @@ func (c *Client) Chat(ctx context.Context, cred Credential, req ChatRequest) (*O
 }
 
 func (c *Client) setHeaders(r *http.Request, cred Credential) {
+	// 公共头（桌面/浏览器两种真实流量共有）
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "text/event-stream, application/json")
+	r.Header.Set("X-Product", c.Product)
+	r.Header.Set("X-Seq-Id", newUUID())
+	r.Header.Set("X-Csrfcode", "")
+	r.Header.Set("X-Referer", c.Origin+"/")
+	r.Header.Set("Origin", c.Origin)
+	r.Header.Set("User-Agent", c.UserAgent)
+
 	switch cred.Kind() {
 	case "oauth":
-		// 桌面态：Bearer + ot_session cookie
+		// 桌面态：Bearer + ot_session cookie，指纹与桌面客户端抓包一致
 		r.Header.Set("Authorization", "Bearer "+cred.OT)
 		parts := []string{"ot_session=" + cred.OT, "userAccountLoginMethod=oauth", "userAccountType=wechat"}
 		if cred.UserID != "" {
@@ -421,8 +446,12 @@ func (c *Client) setHeaders(r *http.Request, cred Credential) {
 		}
 		r.Header.Set("Cookie", strings.Join(parts, "; "))
 	case "console":
-		// 控制台态：保真重放 uin/skey cookie 串（实测不带 ot_session/sid 亦可）
+		// 控制台态：保真重放 uin/skey cookie 串（实测不带 ot_session/sid 亦可）。
+		// 头集切 OrcaTerm Web 版真实流量（HAR 实测），消除「控制台票据 + 桌面 origin」
+		// 这种真实世界不存在的组合。
 		r.Header.Del("Authorization")
+		r.Header.Del("X-Referer")  // 桌面端自定义头，Web 版流量无
+		r.Header.Del("X-Csrfcode") // Web 版 csrfCode 只出现在 URL query
 		cookie := cred.Raw
 		if strings.TrimSpace(cookie) == "" {
 			cookie = "uin=" + cred.Uin + "; skey=" + cred.Skey
@@ -431,13 +460,16 @@ func (c *Client) setHeaders(r *http.Request, cred Credential) {
 			cookie += "; userId=" + cred.UserID
 		}
 		r.Header.Set("Cookie", cookie)
+		r.Header.Set("Origin", DefaultWebOrigin)
+		r.Header.Set("Referer", DefaultWebOrigin+"/")
+		if !c.uaConfigured {
+			r.Header.Set("User-Agent", DefaultWebUserAgent)
+		}
+		r.Header.Set("Sec-Fetch-Site", "same-site")
+		r.Header.Set("Sec-Fetch-Mode", "cors")
+		r.Header.Set("Sec-Fetch-Dest", "empty")
+		r.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	}
-	r.Header.Set("X-Product", c.Product)
-	r.Header.Set("X-Seq-Id", newUUID())
-	r.Header.Set("X-Csrfcode", "")
-	r.Header.Set("X-Referer", c.Origin+"/")
-	r.Header.Set("Origin", c.Origin)
-	r.Header.Set("User-Agent", c.UserAgent)
 }
 
 // Probe 轻量凭证体检：GET conversation/list 只读接口，code=0 即健康。
@@ -478,7 +510,7 @@ func (c *Client) Probe(ctx context.Context, cred Credential) error {
 	if env.Code == 10050000 {
 		return &AuthError{Code: env.Code, Message: env.Message}
 	}
-	if env.Message == "NEED_UIN_AND_SKEY" || strings.Contains(env.Message, "NEED_UIN_AND_SKEY") {
+	if isConsoleAuthExpired(env.Message) {
 		return &AuthError{Code: 10050000, Message: env.Message}
 	}
 	if env.Code != 0 {
@@ -582,8 +614,8 @@ func parseOutcome(raw []byte) (*Outcome, error) {
 	if int(resp.Code) == CodeAuthExpired {
 		return nil, &AuthError{Code: int(resp.Code), Message: resp.Message}
 	}
-	// 控制台态（uin/skey）票据失效时上游返回 code=500 + NEED_UIN_AND_SKEY，同为鉴权失效
-	if resp.Message == "NEED_UIN_AND_SKEY" || strings.Contains(resp.Message, "NEED_UIN_AND_SKEY") {
+	// 控制台态（uin/skey）票据失效：code=500 + 特征 message，同为鉴权失效
+	if isConsoleAuthExpired(resp.Message) {
 		return nil, &AuthError{Code: CodeAuthExpired, Message: resp.Message}
 	}
 	if resp.Code != 0 {

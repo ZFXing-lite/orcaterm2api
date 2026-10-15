@@ -75,8 +75,8 @@ Each upstream account = one OrcaTerm login session. Two flavors are supported an
 | Desktop (OAuth) | `ot_session` (JWT, `sid` optional) | Desktop client DevTools → Network → `assistant/chat` request header; or `%LOCALAPPDATA%\com.orcaterm-desktop.app\.cookies` |
 | Browser console | `uin` + `skey` + `userId` | Log in to the [OrcaTerm web app](https://orcaterm.cloud.tencent.com), then run `copy(document.cookie)` in the F12 console |
 
-- The gateway picks the auth style per credential automatically (`Bearer ot_session` or cookie replay).
-- Console cookies have no standalone expiry; when they go stale the upstream returns `NEED_UIN_AND_SKEY`, which is handled exactly like the desktop `code=10050000`: auto-disable + failover to another account.
+- The gateway picks the auth style per credential automatically (`Bearer ot_session` or cookie replay) and switches the request fingerprint in sync: desktop credentials get the desktop-client Origin/UA, console cookies get the web-app Origin/UA plus browser header set — matching real traffic.
+- Console cookies have no standalone expiry and die with the Tencent Cloud login (skey lives for hours); the upstream then returns `NEED_UIN_AND_SKEY` or `VERIFY_SKEY_UIN_FAILED`, handled exactly like the desktop `code=10050000`: auto-disable + failover — just re-pair with one bookmark click.
 
 ### One-click pairing (bookmarklet, recommended)
 

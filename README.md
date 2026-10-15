@@ -75,8 +75,8 @@ ORCATERM2API_MGMT_KEY=你的面板密码 ./orcaterm2api -c config.yaml
 | 桌面端（OAuth） | `ot_session`（JWT，`sid` 可选） | 桌面客户端开发者工具 → Network → `assistant/chat` 请求头；或 `%LOCALAPPDATA%\com.orcaterm-desktop.app\.cookies` |
 | 浏览器控制台态 | `uin` + `skey` + `userId` | 登录 [OrcaTerm Web 版](https://orcaterm.cloud.tencent.com)后，浏览器 F12 控制台执行 `copy(document.cookie)` |
 
-- 两种形态可混在一个账号池里跑，网关按凭证类型自动选择鉴权方式（`Bearer ot_session` 或 cookie 重放）。
-- 控制台态没有独立过期时间，随腾讯云登录失效；失效时上游返回 `NEED_UIN_AND_SKEY`，与桌面态 `code=10050000` 一样触发自动停用 + 换号重试。
+- 两种形态可混在一个账号池里跑，网关按凭证类型自动选择鉴权方式（`Bearer ot_session` 或 cookie 重放），并同步切换请求指纹（桌面态=客户端 Origin/UA，控制台态=Web 版 Origin/UA/浏览器头集），与真实流量对齐。
+- 控制台态没有独立过期时间，随腾讯云登录失效（skey 寿命数小时级）；失效时上游返回 `NEED_UIN_AND_SKEY` 或 `VERIFY_SKEY_UIN_FAILED`，与桌面态 `code=10050000` 一样触发自动停用 + 换号重试——过期后回面板点一次书签重新收号即可。
 
 ### 一键收号（书签，推荐）
 

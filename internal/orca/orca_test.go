@@ -137,7 +137,7 @@ func TestSetHeadersByKind(t *testing.T) {
 	if ck := req1.Header.Get("Cookie"); !strings.Contains(ck, "ot_session=AAA.BBB") || !strings.Contains(ck, "sid=SID1") {
 		t.Errorf("桌面态 Cookie=%q", ck)
 	}
-	// 控制台态：无 Authorization，保真重放 Raw
+	// 控制台态：无 Authorization，保真重放 Raw，头集切 Web 版流量
 	req2, _ := http.NewRequest(http.MethodPost, cl.chatURL(), nil)
 	cred2 := ParseCookie("uin=o987654; skey=SKY; userId=123456789012")
 	cl.setHeaders(req2, cred2)
@@ -147,5 +147,44 @@ func TestSetHeadersByKind(t *testing.T) {
 	ck := req2.Header.Get("Cookie")
 	if !strings.Contains(ck, "uin=o987654") || !strings.Contains(ck, "skey=SKY") || !strings.Contains(ck, "userId=123456789012") {
 		t.Errorf("控制台态 Cookie=%q", ck)
+	}
+	// 指纹对齐：Origin/Referer 切 Web 版，桌面特有头移除，浏览器头补齐
+	if got := req2.Header.Get("Origin"); got != DefaultWebOrigin {
+		t.Errorf("控制台态 Origin 应切 Web 版, got %q", got)
+	}
+	if got := req2.Header.Get("Referer"); got != DefaultWebOrigin+"/" {
+		t.Errorf("控制台态 Referer=%q", got)
+	}
+	if got := req2.Header.Get("X-Referer"); got != "" {
+		t.Errorf("Web 流量无 X-Referer, got %q", got)
+	}
+	if got := req2.Header.Get("X-Csrfcode"); got != "" {
+		t.Errorf("Web 流量无 X-Csrfcode 头, got %q", got)
+	}
+	if got := req2.Header.Get("User-Agent"); got != DefaultWebUserAgent {
+		t.Errorf("未配置 UA 时应切 Web 版 UA, got %q", got)
+	}
+	if got := req2.Header.Get("Sec-Fetch-Site"); got != "same-site" {
+		t.Errorf("Sec-Fetch-Site=%q", got)
+	}
+	// 桌面态保持桌面指纹不被 Web 头污染
+	if got := req1.Header.Get("Origin"); got != DefaultOrigin {
+		t.Errorf("桌面态 Origin 应保持 tauri, got %q", got)
+	}
+	if got := req1.Header.Get("Referer"); got != "" {
+		t.Errorf("桌面态不应有浏览器 Referer 头, got %q", got)
+	}
+}
+
+func TestConsoleAuthExpiredVariants(t *testing.T) {
+	// 实测抓到的两种控制台态票据失效特征，都必须归为 AuthError（触发停用换号）
+	for _, msg := range []string{
+		`{"code":500,"message":"NEED_UIN_AND_SKEY"}`,
+		`{"code":500,"message":"VERIFY_SKEY_UIN_FAILED"}`,
+	} {
+		_, err := parseOutcome([]byte(msg))
+		if _, ok := err.(*AuthError); !ok {
+			t.Errorf("%s 应归为 AuthError, got %T (%v)", msg, err, err)
+		}
 	}
 }
