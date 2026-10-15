@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sync"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -63,6 +64,10 @@ func (s *Server) handleManagementAPI(w http.ResponseWriter, r *http.Request) {
 		s.mgmtAddKey(w, r)
 	case strings.HasPrefix(path, "keys/") && r.Method == http.MethodDelete:
 		s.mgmtDeleteKey(w, r, strings.TrimPrefix(path, "keys/"))
+	case strings.HasPrefix(path, "keys/") && strings.HasSuffix(path, "/reveal") && r.Method == http.MethodGet:
+		s.mgmtRevealKey(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "keys/"), "/reveal"))
+	case path == "models/refresh" && r.Method == http.MethodPost:
+		s.mgmtModelsRefresh(w, r)
 	case path == "proxies" && r.Method == http.MethodGet:
 		writeJSON(w, 200, map[string]any{"policy": s.cfg.Snapshot().Proxy.Policy, "proxies": s.proxies.Snapshot()})
 	case path == "proxies" && r.Method == http.MethodPost:
@@ -571,4 +576,89 @@ func (s *Server) mgmtPairConsume(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pool.SyncAccounts(s.cfg.Snapshot().Upstream.Keys)
 	writeJSON(w, 200, map[string]any{"ok": true, "kind": cred.Kind(), "name": name, "hint": "收号成功，回面板查看"})
+}
+
+// mgmtRevealKey 单条揭示完整密钥（默认列表仅掩码；明文按需拉取，不落列表响应）。
+func (s *Server) mgmtRevealKey(w http.ResponseWriter, r *http.Request, idxStr string) {
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "索引非法"})
+		return
+	}
+	keys := s.cfg.Snapshot().APIKeys
+	if idx < 0 || idx >= len(keys) {
+		writeJSON(w, 404, map[string]string{"error": "密钥不存在"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"index": idx, "key": keys[idx]})
+}
+
+// mgmtModelsRefresh 逐模型真实探活：用池内一个健康账号对内置模型目录各发一条
+// 极小请求，返回每个模型的可用性/延迟/错误（一次显式动作，非自动轮询）。
+func (s *Server) mgmtModelsRefresh(w http.ResponseWriter, r *http.Request) {
+	acct := s.pool.Pick()
+	if acct == nil {
+		writeJSON(w, 409, map[string]string{"error": "账号池无可用账号，先添加或启用账号"})
+		return
+	}
+	snap := s.cfg.Snapshot()
+	client := orca.NewClient(snap.Upstream.BaseURL, snap.Upstream.Product, snap.Upstream.Origin, snap.Upstream.UserAgent, nil)
+	cred := acct.Credential()
+
+	type result struct {
+		Model   string `json:"model"`
+		Upstream string `json:"upstream"`
+		Legacy  bool   `json:"legacy"`
+		OK      bool   `json:"ok"`
+		MS      int64  `json:"ms"`
+		Error   string `json:"error,omitempty"`
+	}
+	results := make([]result, len(orca.Models))
+	sem := make(chan struct{}, 3) // 探活并发上限，避免打爆单号
+	var wg sync.WaitGroup
+	for i, m := range orca.Models {
+		wg.Add(1)
+		go func(i int, m orca.Model) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			_, err := client.Chat(ctx, cred, orca.ChatRequest{
+				ConversationID: orca.NewConversationID(orca.DefaultProduct),
+				Text:           "hi",
+				UpstreamModel:  m.Upstream,
+				HideTools:      true,
+			})
+			res := result{Model: m.ID, Upstream: m.Upstream, Legacy: m.Legacy, MS: time.Since(start).Milliseconds()}
+			switch {
+			case err == nil:
+				res.OK = true
+			default:
+				msg := err.Error()
+				if strings.Contains(strings.ToLower(msg), "model") && !strings.Contains(msg, "NEED_UIN") {
+					// 上游拒绝该模型名 → 模型不可用，不是账号问题
+					res.Error = msg
+				} else if strings.Contains(msg, "10050000") || strings.Contains(msg, "NEED_UIN_AND_SKEY") || strings.Contains(msg, "VERIFY_SKEY_UIN_FAILED") {
+					res.Error = "账号登录态已失效，请重新收号"
+				} else {
+					res.Error = msg
+					res.OK = true // 网络/限速等暂时性错误不判死模型
+				}
+			}
+			results[i] = res
+		}(i, m)
+	}
+	wg.Wait()
+	usable := 0
+	for _, res := range results {
+		if res.OK {
+			usable++
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"models": results, "usable": usable, "total": len(results),
+		"account": acct.ID, "probed_at": time.Now().Format(time.RFC3339),
+	})
 }

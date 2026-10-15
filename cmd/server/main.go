@@ -23,7 +23,7 @@ import (
 	"github.com/ZFXing-lite/orcaterm2api/internal/server"
 )
 
-const version = "1.1.0"
+const version = "1.1.1"
 
 func main() {
 	cfgPath := flag.String("c", "config.yaml", "配置文件路径")
@@ -54,6 +54,9 @@ func main() {
 	// 用量统计（与账号状态同目录，落在 state/usage.json）
 	usageFile := filepath.Join(filepath.Dir(snap.Metrics.StateFile), "usage.json")
 	tracker := metrics.New(snap.Metrics.Enabled)
+	if err := tracker.Load(usageFile); err != nil {
+		log.Printf("[WARN] 用量文件回读失败（将从头计数）: %v", err)
+	}
 	go tracker.Persist(usageFile, config.ParseDuration(snap.Metrics.FlushEvery, 5*time.Second))
 
 	srv := server.New(cfg, pool, proxyPool, tracker)

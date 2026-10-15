@@ -214,6 +214,17 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.1
+
+**Panel UX upgrade**
+
+- Fix: auto-refresh no longer wipes forms mid-typing (refresh pauses while inputs hold focus or uncommitted content)
+- New "Upstream Models" page: click refresh to live-probe every model with a healthy pooled account (the upstream has no model-list endpoint, so a real probe is the most honest alignment)
+- Token usage gains a totals block: total / input / output tokens plus request/error sums
+- Usage stats now survive restarts: `usage.json` is loaded on boot (previously write-only)
+- Gateway settings page fully localized to Chinese (toggles render as 开启/关闭)
+- Downstream keys stay masked by default; a "reveal" button fetches the full key on demand and toggles back
+
 ### v1.1.0
 
 **Dual credentials + one-click pairing**

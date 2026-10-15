@@ -52,7 +52,7 @@ label{font-size:12px;color:#8b94a7;display:block;margin-bottom:4px}
 
 <script>
 let MGMT_KEY = sessionStorage.getItem('orcaterm2api_key') || '';
-const TABS = [['overview','概览'],['accounts','上游账号'],['keys','下游密钥'],['proxies','代理池'],['paths','接口统计'],['usage','Token 用量'],['settings','网关设置']];
+const TABS = [['overview','概览'],['accounts','上游账号'],['models','上游模型'],['keys','下游密钥'],['proxies','代理池'],['paths','接口统计'],['usage','Token 用量'],['settings','网关设置']];
 let cur = 'overview';
 
 async function api(path, opts={}) {
@@ -77,12 +77,20 @@ function enter() {
   document.getElementById('login').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
   document.getElementById('tabs').innerHTML = TABS.map(([k,n])=>`<button data-t="${k}" onclick="go('${k}')">${n}</button>`).join('');
-  go('overview'); setInterval(()=>{ if(cur==='overview'||cur==='accounts') go(cur,true); }, 5000);
+  go('overview'); setInterval(()=>{ if((cur==='overview'||cur==='accounts') && !userEditing()) go(cur,true); }, 5000);
+}
+// 用户正在输入（有焦点或有未提交内容）时暂停自动刷新，防止填到一半被重建丢内容
+function userEditing() {
+  for (const el of document.querySelectorAll('#content input, #content textarea')) {
+    if (document.activeElement === el) return true;
+    if (el.value !== '') return true;
+  }
+  return false;
 }
 function go(t, silent) {
   cur = t;
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.t===t));
-  ({overview:renderOverview,accounts:renderAccounts,keys:renderKeys,proxies:renderProxies,paths:renderPaths,usage:renderUsage,settings:renderSettings}[t])(silent);
+  ({overview:renderOverview,accounts:renderAccounts,models:renderModels,keys:renderKeys,proxies:renderProxies,paths:renderPaths,usage:renderUsage,settings:renderSettings}[t])(silent);
 }
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const badge = (t,c) => `<span class="badge ${c}">${esc(t)}</span>`;
@@ -186,7 +194,18 @@ async function renderKeys() {
     <div class="row"><div><label>新密钥</label><input id="nk" placeholder="sk-..."></div>
     <div style="flex:0;align-self:end"><button class="primary" onclick="addKey()">添加</button></div></div>
     <table class="mt"><tr><th>#</th><th>预览</th><th>操作</th></tr>
-    ${(j.keys||[]).map(k=>`<tr><td>${k.index}</td><td class="mono">${esc(k.preview)}</td><td><button class="danger" onclick="delKey(${k.index})">删除</button></td></tr>`).join('')||'<tr><td colspan=3 class="small">未设置（开放访问）</td></tr>'}</table></div>`;
+    ${(j.keys||[]).map(k=>`<tr><td>${k.index}</td><td class="mono" id="kv_${k.index}" data-mask="${esc(k.preview)}">${esc(k.preview)}</td><td>
+      <button class="ghost" onclick="revealKey(${k.index},this)">明文</button>
+      <button class="danger" onclick="delKey(${k.index})">删除</button></td></tr>`).join('')||'<tr><td colspan=3 class="small">未设置（开放访问）</td></tr>'}</table></div>`;
+}
+async function revealKey(i, btn) {
+  const cell = document.getElementById('kv_'+i);
+  if (btn.textContent === '隐藏') { cell.textContent = cell.dataset.mask; btn.textContent='明文'; return; }
+  try {
+    const j = await api(`keys/${i}/reveal`);
+    cell.textContent = j.key;
+    btn.textContent = '隐藏';
+  } catch(e) { alert(e.message); }
 }
 async function addKey(){ try{ await api('keys',{method:'POST',body:JSON.stringify({key:document.getElementById('nk').value})}); renderKeys(); }catch(e){alert(e.message);} }
 async function delKey(i){ if(!confirm('删除后立即失效，继续？'))return; try{ await api('keys/'+i,{method:'DELETE'}); renderKeys(); }catch(e){alert(e.message);} }
@@ -212,12 +231,41 @@ async function saveProxies(){
 // ---- 接口统计 ----
 async function renderPaths(){ const j=await api('overview'); document.getElementById('content').innerHTML=`<div class="card"><h3>接口调用统计</h3>${pathTable(j.paths)}</div>`; }
 
+// ---- 上游模型 ----
+async function renderModels(){
+  document.getElementById('content').innerHTML = `
+  <div class="card"><h3>上游模型 <span class="small">点击刷新后用账号池内一个健康账号逐个实测：每个模型发一条极小请求，返回真实可用性与延迟</span></h3>
+    <button class="primary" onclick="refreshModels(this)">刷新（实测可用性）</button> <span class="small" id="mMsg"></span>
+    <table class="mt" id="mTable"><tr><th>模型</th><th>上游名</th><th>状态</th><th>延迟</th><th>说明</th></tr>
+    <tr><td colspan=5 class="small">尚未探测——点「刷新」实时对齐上游可用模型</td></tr></table></div>`;
+}
+async function refreshModels(btn){
+  btn.disabled = true; document.getElementById('mMsg').textContent='探测中，逐模型实测约需数十秒…';
+  try{
+    const j = await api('models/refresh');
+    const rows = (j.models||[]).map(m=>`<tr><td class="mono">${esc(m.model)}</td><td class="mono small">${esc(m.upstream)}</td>
+      <td>${m.ok?badge('可用','ok'):badge('不可用','bad')}${m.legacy?' '+badge('旧版','warn'):''}</td>
+      <td>${m.ms}ms</td><td class="small">${esc(m.error||'-')}</td></tr>`).join('');
+    document.getElementById('mTable').innerHTML = `<tr><th>模型</th><th>上游名</th><th>状态</th><th>延迟</th><th>说明</th></tr>` + rows;
+    document.getElementById('mMsg').textContent = `实测完成：可用 ${j.usable}/${j.total}（探测账号 ${String(j.account).slice(0,8)}，${esc(j.probed_at)}）`;
+  }catch(e){ document.getElementById('mMsg').textContent = ''; alert(e.message); }
+  btn.disabled = false;
+}
+
 // ---- 用量 ----
 async function renderUsage(){
   const j=await api('usage');
   const rows = Object.entries(j.by_account||{}).map(([id,u])=>`<tr><td class="mono">${id.slice(0,8)}</td><td>${u.requests}</td><td>${u.prompt_tokens.toLocaleString()}</td><td>${u.completion_tokens.toLocaleString()}</td><td>${u.total_tokens.toLocaleString()}</td><td>${u.errors}</td></tr>`).join('');
   const mrows = Object.entries(j.by_model||{}).map(([m,u])=>`<tr><td>${esc(m)}</td><td>${u.requests}</td><td>${u.total_tokens.toLocaleString()}</td></tr>`).join('');
+  const t=j.totals||{};
   document.getElementById('content').innerHTML=`
+  <div class="card"><h3>总计</h3>
+    <div class="row">
+      <div><label>总 token</label><div class="mono" style="font-size:1.3em">${(t.total_tokens||0).toLocaleString()}</div></div>
+      <div><label>总输入 token</label><div class="mono" style="font-size:1.3em">${(t.prompt_tokens||0).toLocaleString()}</div></div>
+      <div><label>总输出 token</label><div class="mono" style="font-size:1.3em">${(t.completion_tokens||0).toLocaleString()}</div></div>
+      <div><label>总请求 / 错误</label><div class="mono" style="font-size:1.3em">${(t.requests||0).toLocaleString()} / ${(t.errors||0).toLocaleString()}</div></div>
+    </div></div>
   <div class="card"><h3>按账号 <span class="small">上游不返回真实 token，此处为本地估算，仅供参考</span></h3>
   <table><tr><th>账号</th><th>请求</th><th>输入 token</th><th>输出 token</th><th>合计</th><th>错误</th></tr>${rows||'<tr><td colspan=6 class="small">暂无</td></tr>'}</table></div>
   <div class="card"><h3>按模型</h3><table><tr><th>模型</th><th>请求</th><th>合计 token</th></tr>${mrows||'<tr><td colspan=3 class="small">暂无</td></tr>'}</table></div>`;
@@ -226,15 +274,21 @@ async function renderUsage(){
 // ---- 设置 ----
 async function renderSettings(){
   const j = await api('settings');
-  const f=(id,v)=>`<div><label>${id}</label><input id="s_${id}" value="${esc(v==null?'':v)}"></div>`;
-  const c=(id,v,label)=>`<div><label>${label||id}</label><select id="s_${id}"><option value="true"${v?' selected':''}>true</option><option value="false"${!v?' selected':''}>false</option></select></div>`;
+  // 中文标签映射：字段名（英文键与保存逻辑保持一致，仅展示层中文化）
+  const ZH = {base_url:'上游地址', default_model:'默认模型', timeout:'上游超时',
+    force_model:'强制默认模型', allow_unknown:'允许未知模型直通', hide_tools:'隐藏工具消息',
+    max_tool_rounds:'工具最大轮数', proxy_policy:'代理策略', max_in_flight:'单账号最大并发',
+    cooldown_429:'429 冷却时长', cooldown_5xx:'5xx 冷却时长', max_retries:'跨号重试次数',
+    session_ttl:'会话粘性时长', allow_remote:'允许远程管理'};
+  const f=(id,v)=>`<div><label>${ZH[id]||id}</label><input id="s_${id}" value="${esc(v==null?'':v)}"></div>`;
+  const c=(id,v)=>`<div><label>${ZH[id]||id}</label><select id="s_${id}"><option value="true"${v?' selected':''}>开启</option><option value="false"${!v?' selected':''}>关闭</option></select></div>`;
   document.getElementById('content').innerHTML=`
   <div class="card"><h3>网关设置 <span class="small">保存后立即生效并回写 config.yaml</span></h3>
   <div class="row">${f('base_url',j.base_url)}${f('default_model',j.default_model)}${f('timeout',j.timeout)}</div>
   <div class="row mt">${c('force_model',j.force_model)}${c('allow_unknown',j.allow_unknown)}${c('hide_tools',j.hide_tools)}</div>
   <div class="row mt">${f('max_tool_rounds',j.max_tool_rounds)}${f('proxy_policy',j.proxy_policy)}${f('max_in_flight',j.max_in_flight)}</div>
   <div class="row mt">${f('cooldown_429',j.cooldown_429)}${f('cooldown_5xx',j.cooldown_5xx)}${f('max_retries',j.max_retries)}</div>
-  <div class="row mt">${f('session_ttl',j.session_ttl)}${c('allow_remote',j.allow_remote)}<div><label>面板密码（secret_key，留空=不修改）</label><input id="s_secret_key" type="password" placeholder="不修改"></div></div>
+  <div class="row mt">${f('session_ttl',j.session_ttl)}${c('allow_remote',j.allow_remote)}<div><label>面板密码（留空=不修改）</label><input id="s_secret_key" type="password" placeholder="不修改"></div></div>
   <div class="mt"><button class="primary" onclick="saveSettings()">保存</button> <span class="small" id="smsg"></span></div></div>`;
 }
 async function saveSettings(){

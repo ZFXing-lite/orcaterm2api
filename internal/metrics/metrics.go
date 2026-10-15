@@ -129,7 +129,15 @@ func (t *Tracker) Snapshot() map[string]any {
 	for m, u := range t.byModel {
 		byModel[m] = cp(u)
 	}
-	return map[string]any{"by_account": byAcct, "by_model": byModel}
+	// 总计（全账号/全模型汇总）
+	sum := &Usage{}
+	for _, u := range t.byAcct {
+		sum.PromptTokens += u.PromptTokens
+		sum.CompletionTokens += u.CompletionTokens
+		sum.Requests += u.Requests
+		sum.Errors += u.Errors
+	}
+	return map[string]any{"by_account": byAcct, "by_model": byModel, "totals": cp(sum)}
 }
 
 // PathStats 接口调用统计。
@@ -206,6 +214,33 @@ func (t *Tracker) Persist(path string, every time.Duration) {
 			t.save(path)
 		}
 	}
+}
+
+// Load 回读 save() 落盘的用量文件（重启续账）。
+func (t *Tracker) Load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var snap struct {
+		ByAccount map[string]Usage `json:"by_account"`
+		ByModel   map[string]Usage `json:"by_model"`
+	}
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, u := range snap.ByAccount {
+		t.byAcct[id] = &Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests, Errors: u.Errors}
+	}
+	for m, u := range snap.ByModel {
+		t.byModel[m] = &Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests, Errors: u.Errors}
+	}
+	return nil
 }
 
 func (t *Tracker) save(path string) {
