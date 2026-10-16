@@ -249,3 +249,33 @@ func TestStreamFieldExtractorSilentOnReview(t *testing.T) {
 		t.Errorf("review 流应静默: total=%q emitted=%v", total, x.Emitted())
 	}
 }
+
+func TestParseOutcomeTextFenced(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"围栏+信封", "```json\n{\"code\":0,\"data\":{\"action\":\"completion\",\"taskCompletion\":\"你好\"}}\n```"},
+		{"围栏+内层", "```json\n{\"action\":\"completion\",\"taskCompletion\":\"你好\"}\n```"},
+		{"裸围栏+内层", "```\n{\"action\":\"ask\",\"question\":\"继续吗\"}\n```"},
+		{"围栏带尾空白", "  ```JSON\n{\"action\":\"ask\",\"question\":\"继续吗\"}\n```  \n"},
+		{"纯信封", "{\"code\":0,\"data\":{\"action\":\"completion\",\"taskCompletion\":\"你好\"}}"},
+		{"纯内层", "{\"action\":\"completion\",\"taskCompletion\":\"你好\"}"},
+	}
+	for _, c := range cases {
+		out, err := ParseOutcomeText(c.in)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if out.Text != "你好" && out.Text != "继续吗" {
+			t.Errorf("%s: 提取文本错误 %q", c.name, out.Text)
+		}
+	}
+}
+
+func TestParseOutcomeTextRejectsGarbage(t *testing.T) {
+	if _, err := ParseOutcomeText("```json\n完全不是JSON```"); err == nil {
+		t.Error("非 JSON 内容应报协议错误")
+	}
+}

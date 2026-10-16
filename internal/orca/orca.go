@@ -345,12 +345,57 @@ func (e *AuthError) Error() string { return fmt.Sprintf("upstream auth expired (
 // 或内层协议 JSON {"action":...}（流式只吐 data 内容）——无票据无法实测断言，
 // 两种都接住。
 func ParseOutcomeText(full string) (*Outcome, error) {
-	out, err := parseOutcome([]byte(full))
-	if err == nil {
+	t := stripOutputShell(full)
+	if strings.TrimSpace(t) == "" {
+		return nil, &ProtocolError{Msg: "上游未返回内容"}
+	}
+	// 形态一：完整信封 {"code":0,"data":{...}}
+	if out, err := parseOutcome([]byte(t)); err == nil {
 		return out, nil
 	}
-	wrapped := []byte(`{"code":0,"data":` + full + `}`)
-	return parseOutcome(wrapped)
+	// 形态二：内层协议 JSON——取最外层 {...} 跨度包信封（对围栏/前后噪声免疫）
+	body := outermostJSON(t)
+	if body == "" {
+		body = t
+	}
+	wrapped := []byte(`{"code":0,"data":` + body + `}`)
+	if out, err := parseOutcome(wrapped); err == nil {
+		return out, nil
+	}
+	return parseOutcome([]byte(t))
+}
+
+// stripOutputShell 剥掉上游模型输出习惯包裹的 markdown 代码围栏
+// 与前后空白噪声（实测上游 stream:true 的 token 流可能吐
+// "```json\n{...}\n```"，模型给协议 JSON 加了围栏）。
+func stripOutputShell(s string) string {
+	s = strings.TrimSpace(s)
+	lower := strings.ToLower(s)
+	for _, fence := range []string{"```json\n", "```json\r\n", "```json "} {
+		if strings.HasPrefix(lower, fence) {
+			s = s[len(fence):]
+			break
+		}
+	}
+	if strings.HasPrefix(s, "```") {
+		s = strings.TrimPrefix(s, "```")
+	}
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}
+
+// outermostJSON 提取最外层花括号跨度；找不到返回空。
+func outermostJSON(s string) string {
+	i := strings.Index(s, "{")
+	if i < 0 {
+		return ""
+	}
+	j := strings.LastIndex(s, "}")
+	if j <= i {
+		return ""
+	}
+	return s[i : j+1]
 }
 
 func isConsoleAuthExpired(msg string) bool {

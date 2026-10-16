@@ -23,7 +23,7 @@ import (
 	"github.com/ZFXing-lite/orcaterm2api/internal/server"
 )
 
-const version = "1.1.2"
+const version = "1.1.3"
 
 func main() {
 	cfgPath := flag.String("c", "config.yaml", "配置文件路径")

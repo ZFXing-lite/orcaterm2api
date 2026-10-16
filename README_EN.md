@@ -214,6 +214,10 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.3
+
+- Fix a real-upstream parsing quirk: the upstream model habitually wraps the protocol JSON in a markdown fence (```json … ```), which broke aggregation with "invalid character '`' looking for beginning of value". The parser now strips fences and surrounding noise, and falls back to the outermost brace span; streaming was never affected (the fence sits before the field marker and is swallowed). Both modes verified end-to-end
+
 ### v1.1.2
 
 **Streaming & long-output overhauled**
