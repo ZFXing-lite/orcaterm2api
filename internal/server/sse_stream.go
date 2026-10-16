@@ -9,6 +9,41 @@ import (
 	"github.com/ZFXing-lite/orcaterm2api/internal/relay"
 )
 
+// typewriterSize 每小片的字符数；上游单块可能很大（整段一坨），
+// 下游按此粒度重切并加微延迟产生打字机观感。
+const typewriterSize = 16
+
+// typewriterGap 小片间延迟；末片不延迟以减少总时长损耗。
+const typewriterGap = 15 * time.Millisecond
+
+// splitForTypewriter 按 rune 安全切块（不劈多字节字符）。
+func splitForTypewriter(s string) []string {
+	runes := []rune(s)
+	if len(runes) <= typewriterSize {
+		return []string{s}
+	}
+	var out []string
+	for i := 0; i < len(runes); i += typewriterSize {
+		end := i + typewriterSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		out = append(out, string(runes[i:end]))
+	}
+	return out
+}
+
+// emitTypewriter 把一整块可见文本按打字机节奏逐片下发。
+func emitTypewriter(emit func(string), piece string) {
+	parts := splitForTypewriter(piece)
+	for i, part := range parts {
+		emit(part)
+		if i < len(parts)-1 {
+			time.Sleep(typewriterGap)
+		}
+	}
+}
+
 // sseHead 统一 SSE 响应头（首个下发动作时才提交，保留换号重试窗口）。
 func sseHead(w http.ResponseWriter) {
 	h := w.Header()
@@ -44,8 +79,10 @@ func openAIStreamSink(w http.ResponseWriter, model string, includeUsage bool) re
 	return relay.StreamEvents{
 		OnText: func(piece string) error {
 			ensureStart()
-			send(&relay.StreamChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
-				Choices: []relay.StreamChoice{{Index: 0, Delta: relay.StreamDelta{Content: piece}}}})
+			emitTypewriter(func(part string) {
+				send(&relay.StreamChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+					Choices: []relay.StreamChoice{{Index: 0, Delta: relay.StreamDelta{Content: part}}}})
+			}, piece)
 			return nil
 		},
 		OnFinish: func(resp *relay.ChatResponse) error {
@@ -132,10 +169,12 @@ func anthropicStreamSink(w http.ResponseWriter, model string) relay.StreamEvents
 				})
 				blockOpen = true
 			}
-			send("content_block_delta", map[string]any{
-				"type": "content_block_delta", "index": idx,
-				"delta": map[string]any{"type": "text_delta", "text": piece},
-			})
+			emitTypewriter(func(part string) {
+				send("content_block_delta", map[string]any{
+					"type": "content_block_delta", "index": idx,
+					"delta": map[string]any{"type": "text_delta", "text": part},
+				})
+			}, piece)
 			return nil
 		},
 		OnFinish: func(resp *relay.ChatResponse) error {
@@ -204,10 +243,12 @@ func responsesStreamSink(w http.ResponseWriter, model string) relay.StreamEvents
 	return relay.StreamEvents{
 		OnText: func(piece string) error {
 			ensureStart()
-			send("response.output_text.delta", map[string]any{
-				"type": "response.output_text.delta", "item_id": newResponsesID("msg_"),
-				"output_index": 0, "content_index": 0, "delta": piece,
-			})
+			emitTypewriter(func(part string) {
+				send("response.output_text.delta", map[string]any{
+					"type": "response.output_text.delta", "item_id": newResponsesID("msg_"),
+					"output_index": 0, "content_index": 0, "delta": part,
+				})
+			}, piece)
 			return nil
 		},
 		OnFinish: func(resp *relay.ChatResponse) error {

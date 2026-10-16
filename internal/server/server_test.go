@@ -239,3 +239,26 @@ func TestPairProbeFailRejects(t *testing.T) {
 		t.Fatalf("码应已消费, got %d", w.Code)
 	}
 }
+
+func TestSplitForTypewriter(t *testing.T) {
+	// rune 安全切块：多字节字符不被劈开；小块原样返回
+	small := "短文本"
+	if got := splitForTypewriter(small); len(got) != 1 || got[0] != small {
+		t.Errorf("小块应原样: %v", got)
+	}
+	long := strings.Repeat("中", 50) // 50 runes, 150 bytes
+	parts := splitForTypewriter(long)
+	if len(parts) != 4 { // 16+16+16+2
+		t.Fatalf("切块数错误: %d", len(parts))
+	}
+	for i, p := range parts {
+		for _, r := range p {
+			if r != '中' {
+				t.Errorf("块 %d 含非中文字符: %q", i, p)
+			}
+		}
+	}
+	if len([]rune(parts[3])) != 2 {
+		t.Errorf("末块长度错误: %q", parts[3])
+	}
+}

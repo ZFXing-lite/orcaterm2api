@@ -383,8 +383,12 @@ func (e *Engine) retryableOf(err error) (bool, int, error) {
 		}
 		return false, be.Code, &HTTPError{Status: 502, Code: "upstream_business_error", Message: be.Error()}
 	}
-	if _, ok := err.(*orca.ProtocolError); ok {
-		return false, 0, &HTTPError{Status: 502, Code: "upstream_protocol_error", Message: err.Error()}
+	if pe, ok := err.(*orca.ProtocolError); ok {
+		// JSON 截断特征（流被掐/上游聚合半途而废）是瞬时故障：重发一轮就能好，换号重试
+		if strings.Contains(pe.Msg, "unexpected end of JSON input") || strings.Contains(pe.Msg, "解析上游 JSON 失败") {
+			return true, 0, &HTTPError{Status: 502, Code: "upstream_protocol_error", Message: pe.Error()}
+		}
+		return false, 0, &HTTPError{Status: 502, Code: "upstream_protocol_error", Message: pe.Error()}
 	}
 	return true, 0, &HTTPError{Status: 502, Code: "upstream_transport_error", Message: err.Error()}
 }

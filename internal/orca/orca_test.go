@@ -321,3 +321,18 @@ func TestStreamFieldExtractorSkipsEmptyField(t *testing.T) {
 		t.Errorf("空值跳过失败: %q", out.String())
 	}
 }
+
+func TestStreamFieldExtractorReviewCarriesText(t *testing.T) {
+	// review 响应携带附带说明 taskCompletion：也不应透传（整个流静默，
+	// 工具调用由流末聚合路径产出）
+	x := NewStreamFieldExtractor()
+	var total string
+	for _, tok := range []string{
+		`{"code":0,"data":{"action":"rev`, `iew","tool":{"name":"shell"},"taskCompletion":"顺带说明文本"}`,
+	} {
+		total += x.Feed(tok)
+	}
+	if total != "" || x.Emitted() {
+		t.Errorf("review 流应全静默: %q emitted=%v", total, x.Emitted())
+	}
+}

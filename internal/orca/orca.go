@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -548,6 +549,7 @@ type TokenStream struct {
 	watchdog *time.Timer
 	idle     time.Duration
 	cancel   context.CancelFunc
+	sawDone bool // 上游 SSE 是否显式发过 data: [DONE]
 }
 
 // Next 返回下一个 content 增量；流结束返回 ("", io.EOF)。
@@ -567,14 +569,19 @@ func (t *TokenStream) Next() (string, error) {
 			t.watchdog.Reset(t.idle)
 		}
 		if !t.sc.Scan() {
+			// 流中断暴露为可重试错误。TCP 正常 FIN 时 scanner.Err()==nil
+			// 无法靠它区分——用 [DONE] 见证标志判定半截
+			//（单体 JSON 兜底走 raw 通道，不受此判定影响）
+			if serr := t.sc.Err(); serr != nil {
+				t.err = fmt.Errorf("upstream stream interrupted: %w", serr)
+			} else if !t.sawDone && t.buf.Len() > 0 && t.raw.Len() == 0 {
+				t.err = errors.New("upstream stream ended prematurely (missing [DONE])")
+			}
 			t.finish()
 			return "", t.eofOrErr()
 		}
 		line := strings.TrimSpace(t.sc.Text())
 		if line == "" || strings.HasPrefix(line, ":") { // SSE 注释/空行
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		if !strings.HasPrefix(line, "data:") {
@@ -584,6 +591,7 @@ func (t *TokenStream) Next() (string, error) {
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			t.sawDone = true
 			t.finish()
 			return "", t.eofOrErr()
 		}
@@ -946,6 +954,12 @@ func (x *StreamFieldExtractor) feed(token string) string {
 	case 0:
 		x.pending.WriteString(token)
 		buf := x.pending.String()
+		// review（工具调用）先行静默：其 taskCompletion 只是附带说明，
+		// 不应作为可见文本透传给下游（完整工具调用由流末聚合路径产出）
+		if i := strings.Index(buf, `"action":"review"`); i >= 0 || strings.Contains(buf, `"action": "review"`) {
+			x.state = 2
+			return ""
+		}
 		for _, m := range x.markers {
 			i := strings.Index(buf, m)
 			if i < 0 {

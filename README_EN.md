@@ -214,6 +214,12 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.8
+
+- **Fix residual "unexpected end of JSON input"**: when the upstream stream gets cut (CDN/network/idle watchdog), a clean TCP FIN leaves the scanner silent, so a half JSON masqueraded as a normal end. A `[DONE]` witness flag now detects premature ends, surfaces "upstream stream ended prematurely" as a transient (auto failover retry), and the duplicated `data:` check from v1.1.3 is removed so the single-JSON fallback path is reachable again
+- **Tool-call fix**: the carry-along explanation text in review (tool-call) responses used to leak into downstream visible content; the stream is now fully silent for review and tool calls are produced by end-of-stream aggregation. Full chain verified: tool dispatch -> result feed -> final completion
+- **Typewriter feel**: upstream chunks can be huge (whole paragraphs in one lump). Downstream now re-slices into 16-char pieces (rune-safe) with a 15ms inter-piece cadence — a lump becomes a smooth crawl; applied to all three protocols
+
 ### v1.1.7
 
 - Models page rebuilt: catalog only, no per-model probing (17 real upstream calls were slow and left 17 conversation records on the account). The upstream has no model-list endpoint; the catalog is built-in, same source as the OrcaTerm client
