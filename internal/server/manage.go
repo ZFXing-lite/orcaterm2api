@@ -1,7 +1,6 @@
 package server
 
 import (
-	"sync"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -66,8 +65,8 @@ func (s *Server) handleManagementAPI(w http.ResponseWriter, r *http.Request) {
 		s.mgmtDeleteKey(w, r, strings.TrimPrefix(path, "keys/"))
 	case strings.HasPrefix(path, "keys/") && strings.HasSuffix(path, "/reveal") && r.Method == http.MethodGet:
 		s.mgmtRevealKey(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "keys/"), "/reveal"))
-	case path == "models/refresh" && (r.Method == http.MethodPost || r.Method == http.MethodGet):
-		s.mgmtModelsRefresh(w, r)
+	case path == "models" && r.Method == http.MethodGet:
+		s.mgmtModels(w, r)
 	case path == "proxies" && r.Method == http.MethodGet:
 		writeJSON(w, 200, map[string]any{"policy": s.cfg.Snapshot().Proxy.Policy, "proxies": s.proxies.Snapshot()})
 	case path == "proxies" && r.Method == http.MethodPost:
@@ -599,143 +598,26 @@ func (s *Server) mgmtRevealKey(w http.ResponseWriter, r *http.Request, idxStr st
 
 // mgmtModelsRefresh 逐模型真实探活：用池内一个健康账号对内置模型目录各发一条
 // 极小请求，返回每个模型的可用性/延迟/错误（一次显式动作，非自动轮询）。
-// probeResult 单模型探测结果。
-type probeResult struct {
-	Model    string `json:"model"`
-	Upstream string `json:"upstream"`
-	Legacy   bool   `json:"legacy"`
-	OK       bool   `json:"ok"`
-	MS       int64  `json:"ms"`
-	Error    string `json:"error,omitempty"`
-}
-
-// probeRun 一次模型探测任务的进度快照（异步任务，前端轮询）。
-type probeRun struct {
-	Account   string        `json:"account"`
-	StartedAt time.Time     `json:"started_at"`
-	Done      int           `json:"done"`
-	Total     int           `json:"total"`
-	Finished  bool          `json:"finished"`
-	Err       string        `json:"error,omitempty"`
-	Usable    int           `json:"usable"`
-	Results   []probeResult `json:"results"`
-}
-
-// snapshotRun 返回带已完成结果的副本（读侧安全）。
-func (run *probeRun) snapshot() probeRun {
-	return probeRun{
-		Account: run.Account, StartedAt: run.StartedAt,
-		Done: run.Done, Total: run.Total, Finished: run.Finished,
-		Err: run.Err, Usable: run.Usable,
-		Results: append([]probeResult(nil), run.Results...),
-	}
-}
-
-// mgmtModelsRefresh 启动模型探测（异步）：立即返回进度句柄，前端轮询 GET 获取增量结果。
-// 18 个模型是 18 次真实上游调用，同步等会挂死前端——这是「刷新不出来」的根因。
-func (s *Server) mgmtModelsRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		s.probeMu.Lock()
-		run := s.probe
-		s.probeMu.Unlock()
-		if run == nil {
-			writeJSON(w, 200, map[string]any{"total": 0, "done": 0, "finished": true, "never_run": true})
-			return
-		}
-		writeJSON(w, 200, run.snapshot())
-		return
-	}
-
-	// POST：启动（进行中则幂等返回当前进度）
-	s.probeMu.Lock()
-	if s.probe != nil && !s.probe.Finished {
-		cur := s.probe.snapshot()
-		s.probeMu.Unlock()
-		writeJSON(w, 200, cur)
-		return
-	}
-	acct := s.pool.Pick()
-	if acct == nil {
-		s.probeMu.Unlock()
-		writeJSON(w, 409, map[string]string{"error": "账号池无可用账号，先添加或启用账号"})
-		return
-	}
-	run := &probeRun{Account: acct.ID, StartedAt: time.Now(), Total: len(orca.Models)}
-	s.probe = run
-	s.probeMu.Unlock()
-
-	go s.runModelProbe(run, acct)
-	writeJSON(w, 200, run.snapshot())
-}
-
-// runModelProbe 探测主体：预检登录态 → 逐模型真实调用（4 并发，单模型 15s）。
-func (s *Server) runModelProbe(run *probeRun, acct *keypool.Account) {
-	finish := func(err string) {
-		s.probeMu.Lock()
-		run.Finished, run.Err = true, err
-		s.probeMu.Unlock()
-	}
+// mgmtModels 模型目录（面板「上游模型」页）：内置目录 + 默认模型标记。
+// 上游没有模型清单端点（HAR 实证 DescribeAIModelList 返回空，客户端同为静态目录），
+// 因此这里只做目录展示，不做逐模型可用性探测（17 次真实调用既慢又会在
+// 上游留下 17 条对话记录）。
+func (s *Server) mgmtModels(w http.ResponseWriter, r *http.Request) {
 	snap := s.cfg.Snapshot()
-	probeHTTP := &http.Client{Timeout: 15 * time.Second}
-	client := orca.NewClient(snap.Upstream.BaseURL, snap.Upstream.Product, snap.Upstream.Origin, snap.Upstream.UserAgent, probeHTTP)
-	cred := acct.Credential()
-	convID := orca.NewConversationID(snap.Upstream.Product)
-
-	// 预检：确认登录态，失效短路（不空跑 17 次）
-	probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer probeCancel()
-	first := orca.Models[0]
-	if _, perr := client.Chat(probeCtx, cred, orca.ChatRequest{
-		ConversationID: convID, Text: "hi",
-		UpstreamModel: first.Upstream, HideTools: true,
-	}); perr != nil {
-		msg := perr.Error()
-		if strings.Contains(msg, "10050000") || orca.IsConsoleAuthExpired(msg) {
-			finish("探测账号登录态已失效，请在面板重新收号（或启用其他账号）")
-			return
-		}
+	type entry struct {
+		ID       string `json:"id"`
+		Upstream string `json:"upstream"`
+		Legacy   bool   `json:"legacy"`
+		Default  bool   `json:"default"`
 	}
-
-	sem := make(chan struct{}, 4)
-	var wg sync.WaitGroup
+	defID := snap.Upstream.DefaultModel
+	defUpstream, _ := orca.ResolveModel(defID, defID, true)
+	list := make([]entry, 0, len(orca.Models))
 	for _, m := range orca.Models {
-		wg.Add(1)
-		go func(m orca.Model) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			start := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			_, err := client.Chat(ctx, cred, orca.ChatRequest{
-				ConversationID: convID, Text: "hi",
-				UpstreamModel: m.Upstream, HideTools: true,
-			})
-			res := probeResult{Model: m.ID, Upstream: m.Upstream, Legacy: m.Legacy, MS: time.Since(start).Milliseconds()}
-			switch {
-			case err == nil:
-				res.OK = true
-			default:
-				msg := err.Error()
-				switch {
-				case strings.Contains(msg, "10050000") || orca.IsConsoleAuthExpired(msg):
-					res.Error = "账号登录态已失效"
-				case strings.Contains(strings.ToLower(msg), "model"):
-					res.Error = msg // 上游拒绝该模型名：模型不可用
-				default:
-					res.Error = msg
-					res.OK = true // 网络/限速等暂时性错误不判死模型
-				}
-			}
-			s.probeMu.Lock()
-			run.Results = append(run.Results, res)
-			run.Done++
-			if res.OK {
-				run.Usable++
-			}
-			s.probeMu.Unlock()
-		}(m)
+		list = append(list, entry{ID: m.ID, Upstream: m.Upstream, Legacy: m.Legacy, Default: m.Upstream == defUpstream})
 	}
-	wg.Wait()
-	finish("")
+	writeJSON(w, 200, map[string]any{
+		"models": list, "total": len(list),
+		"default_model": defID, "follow_downstream": !snap.Upstream.ForceModel,
+	})
 }

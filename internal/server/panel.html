@@ -32,6 +32,7 @@ label{font-size:12px;color:#8b94a7;display:block;margin-bottom:4px}
 .mono{font-family:ui-monospace,monospace;font-size:12px}
 .small{font-size:12px;color:#8b94a7}
 .mt{margin-top:10px}
+.mb{margin-bottom:10px}
 </style>
 </head>
 <body>
@@ -232,50 +233,20 @@ async function saveProxies(){
 async function renderPaths(){ const j=await api('overview'); document.getElementById('content').innerHTML=`<div class="card"><h3>接口调用统计</h3>${pathTable(j.paths)}</div>`; }
 
 // ---- 上游模型 ----
-let mTimer = null;
-function mRows(list, total){
-  const rows = (list||[]).map(m=>`<tr><td class="mono">${esc(m.model)}</td><td class="mono small">${esc(m.upstream)}</td>
-    <td>${m.ok?badge('可用','ok'):badge('不可用','bad')}${m.legacy?' '+badge('旧版','warn'):''}</td>
-    <td>${m.ms}ms</td><td class="small">${esc(m.error||'-')}</td></tr>`).join('');
-  const placeholder = total>0 ? '' : '<tr><td colspan=5 class="small">尚未探测——点「刷新」实时对齐上游可用模型</td></tr>';
-  return `<tr><th>模型</th><th>上游名</th><th>状态</th><th>延迟</th><th>说明</th></tr>` + rows + placeholder;
-}
 async function renderModels(){
-  if (mTimer) { clearInterval(mTimer); mTimer = null; }
+  const j = await api('models');
+  const rows = (j.models||[]).map(m=>`<tr>
+    <td class="mono">${esc(m.id)}${m.default?' '+badge('默认','ok'):''}</td>
+    <td class="mono small">${esc(m.upstream)}</td>
+    <td>${m.legacy?badge('旧版','warn'):badge('当前','ok')}</td></tr>`).join('');
+  const mode = j.follow_downstream ? '跟随下游：客户端请求什么模型，上游就走什么' : '强制统一：所有请求走默认模型';
   document.getElementById('content').innerHTML = `
-  <div class="card"><h3>上游模型 <span class="small">点击刷新后用账号池内一个健康账号逐个实测：每个模型发一条极小请求，返回真实可用性与延迟（后台探测，可随时切走）</span></h3>
-    <button class="primary" onclick="refreshModels(this)">刷新（实测可用性）</button> <span class="small" id="mMsg"></span>
-    <table class="mt" id="mTable">${mRows([],0)}</table></div>`;
-  // 已有历史结果则先展示
-  try{ const j = await api('models/refresh'); if (j && j.total > 0) mRender(j); }catch(e){}
-}
-function mRender(j){
-  document.getElementById('mTable').innerHTML = mRows(j.results, j.total);
-  const msg = document.getElementById('mMsg'); if (!msg) return;
-  if (j.error) { msg.textContent = '探测失败：' + j.error; return; }
-  if (j.finished) {
-    msg.textContent = `实测完成：可用 ${j.usable}/${j.total}（探测账号 ${String(j.account||'').slice(0,8)}，${esc((j.started_at||'').slice(0,19))}）`;
-  } else {
-    msg.textContent = `探测中 ${j.done}/${j.total}…（后台进行，可切到其他页再回来）`;
-  }
-}
-async function refreshModels(btn){
-  btn.disabled = true;
-  try{
-    const j = await api('models/refresh');   // POST：启动/复用进行中的探测
-    mRender(j);
-    if (!j.finished) {
-      if (mTimer) clearInterval(mTimer);
-      mTimer = setInterval(async ()=>{
-        if (cur !== 'models') { clearInterval(mTimer); mTimer = null; return; }  // 切页停轮询
-        try{
-          const p = await api('models/refresh'); // GET：增量进度
-          mRender(p);
-          if (p.finished) { clearInterval(mTimer); mTimer = null; const b = document.querySelector('#content button'); if (b) b.disabled = false; }
-        }catch(e){ clearInterval(mTimer); mTimer = null; }
-      }, 2000);
-    } else { btn.disabled = false; }
-  }catch(e){ btn.disabled = false; alert(e.message); }
+  <div class="card"><h3>上游模型目录 <span class="small">上游无模型清单端点，此处为网关内置目录（与 OrcaTerm 客户端同源）</span></h3>
+    <div class="small mb">当前路由模式：<b>${mode}</b>${j.follow_downstream?'':'（面板「网关设置」可改）'}</div>
+    <button class="primary" onclick="renderModels()">刷新</button>
+    <table class="mt"><tr><th>模型</th><th>上游名</th><th>版本状态</th></tr>
+    ${rows||'<tr><td colspan=3 class="small">目录为空</td></tr>'}</table>
+    <div class="small mt">共 ${j.total} 个。下游客户端也可通过 <code>/v1/models</code> 获取该目录。</div></div>`;
 }
 
 // ---- 用量 ----

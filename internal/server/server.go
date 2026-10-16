@@ -30,10 +30,8 @@ type Server struct {
 	tracker *metrics.Tracker
 	paths   *metrics.PathStats
 	mux     *http.ServeMux
-	pairMu  sync.Mutex
-	pairs   map[string]*pairSession
-	probeMu sync.Mutex
-	probe   *probeRun
+	pairMu sync.Mutex
+	pairs  map[string]*pairSession
 }
 
 // New 创建服务。

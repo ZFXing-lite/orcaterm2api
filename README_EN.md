@@ -214,6 +214,12 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.7
+
+- Models page rebuilt: catalog only, no per-model probing (17 real upstream calls were slow and left 17 conversation records on the account). The upstream has no model-list endpoint; the catalog is built-in, same source as the OrcaTerm client
+- Also fixes the v1.1.6 frontend bug where the probe never started (missing POST) — removed along with the probing machinery
+- Page now shows the default-model badge, the current routing mode (follow downstream / force unified), and a /v1/models hint; refresh is instant (<1ms, no network calls)
+
 ### v1.1.6
 
 - Fix the upstream-models page refresh hanging: probing 17 models means 17 real upstream calls (minutes), and the old synchronous HTTP wait froze the frontend. Now it is a background task with 2s frontend polling — POST returns within 1ms, results stream in incrementally, you can switch tabs mid-probe (history re-renders on return); duplicate clicks reuse the running task; the stale-ticket preflight short-circuit stays
