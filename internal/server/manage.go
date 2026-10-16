@@ -602,19 +602,38 @@ func (s *Server) mgmtModelsRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := s.cfg.Snapshot()
-	client := orca.NewClient(snap.Upstream.BaseURL, snap.Upstream.Product, snap.Upstream.Origin, snap.Upstream.UserAgent, nil)
+	// 探活专用短超时 client：12s 头超时 + 12s 空闲判死（不用全局 300s）
+	probeHTTP := &http.Client{Timeout: 15 * time.Second}
+	client := orca.NewClient(snap.Upstream.BaseURL, snap.Upstream.Product, snap.Upstream.Origin, snap.Upstream.UserAgent, probeHTTP)
 	cred := acct.Credential()
 
+	// 预检：先用第一个模型确认账号登录态，失效则短路全部（不浪费 17 次调用）
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer probeCancel()
+	convID := orca.NewConversationID(snap.Upstream.Product)
+	first := orca.Models[0]
+	_, perr := client.Chat(probeCtx, cred, orca.ChatRequest{
+		ConversationID: convID, Text: "hi",
+		UpstreamModel: first.Upstream, HideTools: true,
+	})
+	if perr != nil {
+		msg := perr.Error()
+		if strings.Contains(msg, "10050000") || strings.Contains(msg, "NEED_UIN_AND_SKEY") || strings.Contains(msg, "VERIFY_SKEY_UIN_FAILED") {
+			writeJSON(w, 409, map[string]string{"error": "探测账号登录态已失效，请在面板重新收号（或启用其他账号）"})
+			return
+		}
+	}
+
 	type result struct {
-		Model   string `json:"model"`
+		Model    string `json:"model"`
 		Upstream string `json:"upstream"`
-		Legacy  bool   `json:"legacy"`
-		OK      bool   `json:"ok"`
-		MS      int64  `json:"ms"`
-		Error   string `json:"error,omitempty"`
+		Legacy   bool   `json:"legacy"`
+		OK       bool   `json:"ok"`
+		MS       int64  `json:"ms"`
+		Error    string `json:"error,omitempty"`
 	}
 	results := make([]result, len(orca.Models))
-	sem := make(chan struct{}, 3) // 探活并发上限，避免打爆单号
+	sem := make(chan struct{}, 4) // 探活并发上限，避免打爆单号
 	var wg sync.WaitGroup
 	for i, m := range orca.Models {
 		wg.Add(1)
@@ -623,10 +642,10 @@ func (s *Server) mgmtModelsRefresh(w http.ResponseWriter, r *http.Request) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			start := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			_, err := client.Chat(ctx, cred, orca.ChatRequest{
-				ConversationID: orca.NewConversationID(orca.DefaultProduct),
+				ConversationID: convID, // 同会话：账号只多一条会话记录而不是 18 条
 				Text:           "hi",
 				UpstreamModel:  m.Upstream,
 				HideTools:      true,
@@ -637,11 +656,11 @@ func (s *Server) mgmtModelsRefresh(w http.ResponseWriter, r *http.Request) {
 				res.OK = true
 			default:
 				msg := err.Error()
-				if strings.Contains(strings.ToLower(msg), "model") && !strings.Contains(msg, "NEED_UIN") {
+				if strings.Contains(msg, "10050000") || strings.Contains(msg, "NEED_UIN_AND_SKEY") || strings.Contains(msg, "VERIFY_SKEY_UIN_FAILED") {
+					res.Error = "账号登录态已失效，请重新收号"
+				} else if strings.Contains(strings.ToLower(msg), "model") {
 					// 上游拒绝该模型名 → 模型不可用，不是账号问题
 					res.Error = msg
-				} else if strings.Contains(msg, "10050000") || strings.Contains(msg, "NEED_UIN_AND_SKEY") || strings.Contains(msg, "VERIFY_SKEY_UIN_FAILED") {
-					res.Error = "账号登录态已失效，请重新收号"
 				} else {
 					res.Error = msg
 					res.OK = true // 网络/限速等暂时性错误不判死模型

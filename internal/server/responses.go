@@ -61,7 +61,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rreq.Stream {
-		writeResponsesSSE(w, resp)
+		s.engine.CompleteStream(r.Context(), creq, sessionKeyOf(r, creq), responsesStreamSink(w, rreq.Model))
 		return
 	}
 	writeJSON(w, 200, chatToResponses(resp))

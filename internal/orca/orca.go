@@ -12,6 +12,7 @@
 package orca
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -23,6 +24,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -338,6 +340,19 @@ func (e *AuthError) Error() string { return fmt.Sprintf("upstream auth expired (
 
 // isConsoleAuthExpired 控制台态（uin/skey）票据失效的两种上游特征（实测）：
 // NEED_UIN_AND_SKEY（票据缺失）与 VERIFY_SKEY_UIN_FAILED（skey 过期/校验失败）。
+// ParseOutcomeText 从流式聚合文本解析结果。
+// 兼容两种形态：完整信封 {"code":0,"data":{...}}（非流式响应体的逐 token 重放）
+// 或内层协议 JSON {"action":...}（流式只吐 data 内容）——无票据无法实测断言，
+// 两种都接住。
+func ParseOutcomeText(full string) (*Outcome, error) {
+	out, err := parseOutcome([]byte(full))
+	if err == nil {
+		return out, nil
+	}
+	wrapped := []byte(`{"code":0,"data":` + full + `}`)
+	return parseOutcome(wrapped)
+}
+
 func isConsoleAuthExpired(msg string) bool {
 	return strings.Contains(msg, "NEED_UIN_AND_SKEY") || strings.Contains(msg, "VERIFY_SKEY_UIN_FAILED")
 }
@@ -395,30 +410,175 @@ func (c *Client) chatURL() string {
 	return c.BaseURL + "/assistant/chat?name=" + c.Product + "&mode=0&csrfCode=&sseresume=true"
 }
 
-// Chat 发送一轮上游聊天（非流式结构化），返回归一化结果。
+// Chat 发送一轮上游聊天，返回归一化结果。
+// 传输层走 stream:true 的 SSE 分块读取（绕过 EdgeOne 对单响应的大小/时长限制，
+// 长文本不再截断），在网关内聚合出与原非流式完全一致的协议 JSON 后解析。
 func (c *Client) Chat(ctx context.Context, cred Credential, req ChatRequest) (*Outcome, error) {
-	body, err := c.buildBody(req, cred.UserID)
+	ts, err := c.ChatStreamCollect(ctx, cred, req)
 	if err != nil {
 		return nil, err
 	}
+	// 消费整条流完成聚合（Next 边读边累积协议 JSON 文本）
+	for {
+		if _, err := ts.Next(); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+	}
+	return ParseOutcomeText(ts.Full())
+}
+
+// chatStreamCollect 发起 SSE 流式请求并完整聚合。
+// 返回 token 流对象（含逐块回调能力，供真流式透传复用）。
+func (c *Client) ChatStreamCollect(ctx context.Context, cred Credential, req ChatRequest) (*TokenStream, error) {
+	body, err := c.buildStreamBody(req, cred.UserID)
+	if err != nil {
+		return nil, err
+	}
+	// 流式调用禁总超时（长生成可远超 300s），改用空闲看门狗：
+	// 块间 90s 无数据判死；探活等短超时场景沿用 Client 配置。
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	c.setHeaders(httpReq, cred)
-	resp, err := c.HTTP.Do(httpReq)
+	streamClient := &http.Client{Transport: c.HTTP.Transport}
+	if c.HTTP.Transport == nil {
+		streamClient.Transport = http.DefaultTransport
+	}
+	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read upstream response: %w", err)
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
 		return nil, &BusinessError{Code: resp.StatusCode, Message: fmt.Sprintf("upstream http %d: %s", resp.StatusCode, truncate(string(raw), 300))}
 	}
-	return parseOutcome(raw)
+
+	_, cancel := context.WithCancel(ctx)
+	ts := &TokenStream{resp: resp, cancel: cancel}
+	idle := 90 * time.Second
+	if c.HTTP.Timeout > 0 && c.HTTP.Timeout < idle {
+		idle = c.HTTP.Timeout
+	}
+	ts.idle = idle
+	ts.watchdog = time.AfterFunc(idle, cancel)
+	go func() {
+		<-ctx.Done() // 外部取消/空闲判死：强制中断阻塞读
+		resp.Body.Close()
+	}()
+	return ts, nil
+}
+
+// TokenStream 上游 SSE token 流：逐块产出 content，支持聚合与透传两种消费方式。
+type TokenStream struct {
+	mu       sync.Mutex
+	resp     *http.Response
+	sc       *bufio.Scanner
+	buf      strings.Builder // 聚合的协议 JSON 文本
+	raw      strings.Builder // 非 SSE 形态兜底：上游忽略 stream 参数时收整块 JSON
+	err      error
+	done     bool
+	watchdog *time.Timer
+	idle     time.Duration
+	cancel   context.CancelFunc
+}
+
+// Next 返回下一个 content 增量；流结束返回 ("", io.EOF)。
+// 失败返回错误（网络中断/上游错误块/空闲判死）。
+func (t *TokenStream) Next() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done {
+		return "", t.eofOrErr()
+	}
+	if t.sc == nil {
+		t.sc = bufio.NewScanner(t.resp.Body)
+		t.sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	}
+	for {
+		if t.watchdog != nil && t.idle > 0 {
+			t.watchdog.Reset(t.idle)
+		}
+		if !t.sc.Scan() {
+			t.finish()
+			return "", t.eofOrErr()
+		}
+		line := strings.TrimSpace(t.sc.Text())
+		if line == "" || strings.HasPrefix(line, ":") { // SSE 注释/空行
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			// 非 SSE 载荷行：兜底聚合（上游可能忽略 stream 参数返回单体 JSON）
+			t.raw.WriteString(line)
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			t.finish()
+			return "", t.eofOrErr()
+		}
+		// 上游错误行：data: [ERROR]: ...（实测形态）
+		if strings.HasPrefix(payload, "[ERROR]") {
+			t.err = fmt.Errorf("upstream stream error: %s", truncate(payload, 300))
+			t.finish()
+			return "", t.err
+		}
+		var chunk struct {
+			Content string `json:"content"`
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue // 非 JSON 载荷行，跳过
+		}
+		if chunk.Code == 10050000 || isConsoleAuthExpired(chunk.Message) {
+			t.err = &AuthError{Code: chunk.Code, Message: chunk.Message}
+			t.finish()
+			return "", t.err
+		}
+		if chunk.Code == 429 {
+			t.err = &BusinessError{Code: 429, Message: chunk.Message}
+			t.finish()
+			return "", t.err
+		}
+		t.buf.WriteString(chunk.Content)
+		return chunk.Content, nil
+	}
+}
+
+// Full 聚合全部收到的 content（流读尽后调用）。
+// SSE 形态聚合为逐 token 拼接；上游忽略 stream 参数时回退为单体 JSON 文本。
+func (t *TokenStream) Full() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.buf.Len() > 0 {
+		return t.buf.String()
+	}
+	return t.raw.String()
+}
+
+func (t *TokenStream) finish() {
+	t.done = true
+	if t.watchdog != nil {
+		t.watchdog.Stop()
+	}
+	if t.cancel != nil {
+		t.cancel()
+	}
+}
+
+func (t *TokenStream) eofOrErr() error {
+	if t.err != nil {
+		return t.err
+	}
+	return io.EOF
 }
 
 func (c *Client) setHeaders(r *http.Request, cred Credential) {
@@ -520,6 +680,15 @@ func (c *Client) Probe(ctx context.Context, cred Credential) error {
 }
 
 func (c *Client) buildBody(req ChatRequest, userID string) ([]byte, error) {
+	return c.buildBodyStream(req, userID, false)
+}
+
+// buildStreamBody stream:true 形态（SSE 分块传输，绕过单响应上限）。
+func (c *Client) buildStreamBody(req ChatRequest, userID string) ([]byte, error) {
+	return c.buildBodyStream(req, userID, true)
+}
+
+func (c *Client) buildBodyStream(req ChatRequest, userID string, stream bool) ([]byte, error) {
 	mcpServers, uiServers := []string{}, []string{}
 	if req.EnableTools {
 		mcpServers = []string{"mcp-server-orcaterm-oauth"}
@@ -552,7 +721,7 @@ func (c *Client) buildBody(req ChatRequest, userID string) ([]byte, error) {
 			"emphasisPrompt": "",
 			"files":          []any{},
 		},
-		"stream": false,
+		"stream": stream,
 	}
 	return json.Marshal(body)
 }
@@ -681,3 +850,183 @@ var NativeTools = map[string]bool{
 
 // IsNativeTool 是否为 OrcaTerm 原生工具。
 func IsNativeTool(name string) bool { return NativeTools[name] }
+
+// StreamFieldExtractor 流式字段提取器：从逐 token 的协议 JSON 文本流中
+// 实时提取可见字段（taskCompletion / question）内容并还原转义，
+// 供下游真流式透传；工具调用（review）等无可见字段的场景保持静默，
+// 由流末聚合路径兜底。
+type StreamFieldExtractor struct {
+	state    int // 0=找标记 1=产出中 2=已结束
+	pending  strings.Builder // WAIT 态的尾部缓冲（防标记跨 token 劈开）
+	markers  []string
+	backslash bool // EMIT 态：上一字符是裸反斜杠
+	hexBuf   []byte  // EMIT 态：\uXXXX 不足 4 位的缓冲
+	emitted  bool
+}
+
+// NewStreamFieldExtractor 默认提取 taskCompletion 与 question。
+// 标记同时兼容紧凑（"k":"v"）与宽松（"k": "v"）两种序列化形态。
+func NewStreamFieldExtractor() *StreamFieldExtractor {
+	return &StreamFieldExtractor{markers: []string{
+		`"taskCompletion":"`, `"taskCompletion": "`,
+		`"question":"`, `"question": "`,
+	}}
+}
+
+// Feed 喂入一个 content token，返回其中可见文本（可能为空）。
+func (x *StreamFieldExtractor) Feed(token string) string {
+	return x.yield(x.feed(token))
+}
+
+func (x *StreamFieldExtractor) feed(token string) string {
+	switch x.state {
+	case 0:
+		x.pending.WriteString(token)
+		buf := x.pending.String()
+		for _, m := range x.markers {
+			if i := strings.Index(buf, m); i >= 0 {
+				x.state = 1
+				rest := buf[i+len(m):]
+				x.pending.Reset()
+				return x.emitUnescaped(rest)
+			}
+		}
+		// 未命中：保留「最长标记-1」的尾部，防标记跨 token 劈开
+		keep := 0
+		for _, m := range x.markers {
+			if len(m)-1 > keep {
+				keep = len(m) - 1
+			}
+		}
+		if len(buf) > keep {
+			x.pending.Reset()
+			x.pending.WriteString(buf[len(buf)-keep:])
+		}
+		return ""
+	case 1:
+		return x.emitUnescaped(token)
+	default:
+		return ""
+	}
+}
+
+// yield 统一产出收口：记录「已产出可见文本」，engine 据此关闭换号重试窗口。
+func (x *StreamFieldExtractor) yield(s string) string {
+	if s != "" {
+		x.emitted = true
+	}
+	return s
+}
+
+// emitUnescaped 还原 JSON 字符串转义；遇到未转义的引号即字段结束。
+func (x *StreamFieldExtractor) emitUnescaped(s string) string {
+	var out strings.Builder
+	i := 0
+	// 先消化上一 token 遗留的转义缓冲
+	if x.hexBuf != nil && len(x.hexBuf) > 0 {
+		need := 4 - len(x.hexBuf)
+		if len(s) >= need {
+			for j := 0; j < need; j++ {
+				x.hexBuf = append(x.hexBuf, s[j])
+			}
+			out.WriteRune(hexRune(x.hexBuf))
+			x.hexBuf = x.hexBuf[:0]
+			i = need
+		} else {
+			x.hexBuf = append(x.hexBuf, s...)
+			return "" // 整个 token 都不够补 \u，继续攒
+		}
+	}
+	if x.backslash && i < len(s) {
+		x.backslash = false
+		nc := s[i]
+		if nc == 'u' { // 反斜杠与 u 劈开：转入 hex 收集
+			if i+5 < len(s) {
+				out.WriteRune(hexRune([]byte(s[i+1 : i+5])))
+				i += 5
+			} else {
+				x.hexBuf = append(x.hexBuf, s[i+1:]...)
+				i = len(s)
+			}
+		} else {
+			out.WriteString(unescapePair(s[i : i+1]))
+			i++
+		}
+	}
+	for i < len(s) {
+		ch := s[i]
+		if ch == '\\' {
+			if i+1 >= len(s) {
+				x.backslash = true // 反斜杠劈在 token 尾
+				break
+			}
+			nc := s[i+1]
+			if nc == 'u' {
+				if i+6 <= len(s) {
+					out.WriteRune(hexRune([]byte(s[i+2 : i+6])))
+					i += 6
+				} else {
+					x.hexBuf = append(x.hexBuf, s[i+2:]...) // \u 劈开，攒 hex
+					i = len(s)
+				}
+			} else {
+				out.WriteString(unescapePair(s[i+1 : i+2]))
+				i += 2
+			}
+			continue
+		}
+		if ch == '"' { // 字段结束
+			x.state = 2
+			return out.String()
+		}
+		out.WriteByte(ch)
+		i++
+	}
+	return out.String()
+}
+
+// Emittd 是否已产出过可见文本（engine 据此判定可下发/重试窗口）。
+func (x *StreamFieldExtractor) Emitted() bool { return x.emitted }
+
+func hexRune(b []byte) rune {
+	v := 0
+	for _, c := range b {
+		v = v*16 + hexVal(c)
+	}
+	return rune(v)
+}
+
+func hexVal(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return 0
+}
+
+func unescapePair(s string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	switch s[0] {
+	case 'n':
+		return "\n"
+	case 't':
+		return "\t"
+	case 'r':
+		return "\r"
+	case 'b':
+		return "\b"
+	case 'f':
+		return "\f"
+	case '/':
+		return "/"
+	case '"', '\\':
+		return s
+	}
+	return `\` + s // 未知转义保守原样
+}

@@ -214,6 +214,16 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.2
+
+**Streaming & long-output overhauled**
+
+- Upstream transport switched to true streaming (SSE chunked reads), bypassing CDN limits on single-response size/duration — long outputs no longer truncate; timeout is now a 90s inter-chunk idle watchdog instead of a hard total cap
+- `stream:true` is a real typewriter now: downstream receives text as fast as the upstream emits it (live field extractor unescapes taskCompletion/question across token splits)
+- Failover retries keep working until the first byte reaches the downstream
+- Tool calls (review) fall back to end-of-stream aggregation; both envelope and inner protocol shapes, loose and compact serialization, are handled
+- Model-probe page: auth preflight short-circuits when the account ticket is stale (no more 17 wasted calls), 15s per-model timeout, concurrency 4, single conversation for the whole sweep
+
 ### v1.1.1
 
 **Panel UX upgrade**

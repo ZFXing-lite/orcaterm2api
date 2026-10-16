@@ -188,3 +188,64 @@ func TestConsoleAuthExpiredVariants(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamFieldExtractor(t *testing.T) {
+	// 完整流：协议 JSON 逐 token，标记劈开 + 转义 + \u 跨 token
+	x := NewStreamFieldExtractor()
+	var out strings.Builder
+	for _, tok := range []string{
+		`{"action":"completion","thi`, `nking":"...","taskComp`,
+		`letion":"第一段`, `\n第二段`, `\"`, `引号`, `\"`, ` unicode:`, `中文`,
+		`"}sth"`, ` after`,
+	} {
+		out.WriteString(x.Feed(tok))
+	}
+	got := out.String()
+	want := "第一段\n第二段\"引号\" unicode:中文"
+	if got != want {
+		t.Errorf("提取结果错误:\n got=%q\nwant=%q", got, want)
+	}
+	if !x.Emitted() {
+		t.Error("应标记已产出")
+	}
+}
+
+func TestStreamFieldExtractorAskQuestion(t *testing.T) {
+	x := NewStreamFieldExtractor()
+	var out strings.Builder
+	for _, tok := range []string{`{"action":"ask","question":"要`, `继续吗` + "\"", `":"x"}`} {
+		out.WriteString(x.Feed(tok))
+	}
+	if out.String() != "要继续吗" {
+		t.Errorf("ask 提取错误: %q", out.String())
+	}
+}
+
+func TestStreamFieldExtractorUnicodeSplit(t *testing.T) {
+	// \uXXXX 劈成两个 token：4e2d = 中
+	x := NewStreamFieldExtractor()
+	out := x.Feed(`{"taskCompletion":"\`) // 反斜杠+u 被劈
+	if out != "" {
+		t.Errorf("转义未完成不应产出: %q", out)
+	}
+	out = x.Feed(`u4e`) // hex 不满 4
+	if out != "" {
+		t.Errorf("hex 不满 4 不应产出: %q", out)
+	}
+	out += x.Feed(`2d文`) // 补满 hex + 后续正常文本
+	if out != "中文" {
+		t.Errorf("unicode 跨 token 还原错误: %q", out)
+	}
+}
+
+func TestStreamFieldExtractorSilentOnReview(t *testing.T) {
+	// 工具调用（review）无可见字段：全程静默，由流末聚合兜底
+	x := NewStreamFieldExtractor()
+	var total string
+	for _, tok := range []string{`{"action":"review","tool":{"na`, `me":"shell","args":{"cmd":"ls"}` + `}}`} {
+		total += x.Feed(tok)
+	}
+	if total != "" || x.Emitted() {
+		t.Errorf("review 流应静默: total=%q emitted=%v", total, x.Emitted())
+	}
+}

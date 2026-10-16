@@ -208,6 +208,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 真流式：上游 SSE 直通下游（打字机），流末聚合补工具调用/usage
+	if req.Stream {
+		includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+		s.engine.CompleteStream(r.Context(), &req, sessionKeyOf(r, &req), openAIStreamSink(w, req.Model, includeUsage))
+		return
+	}
 	resp, err := s.engine.Complete(r.Context(), &req, sessionKeyOf(r, &req))
 	if err != nil {
 		writeOpenAIError(w, errToHTTP(err))
@@ -218,11 +224,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.UpstreamAction != "" {
 		w.Header().Set("X-OrcaTerm-Action", resp.UpstreamAction)
-	}
-	if req.Stream {
-		includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
-		relay.WriteSSE(w, resp, includeUsage)
-		return
 	}
 	writeJSON(w, 200, resp.ToOpenAIResponse())
 }

@@ -95,7 +95,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("X-OrcaTerm-Action", resp.UpstreamAction)
 	}
 	if areq.Stream {
-		writeAnthropicSSE(w, resp)
+		s.engine.CompleteStream(r.Context(), creq, sessionKeyOf(r, creq), anthropicStreamSink(w, areq.Model))
 		return
 	}
 	writeJSON(w, 200, chatToAnthropic(resp))
