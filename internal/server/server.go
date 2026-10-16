@@ -32,6 +32,8 @@ type Server struct {
 	mux     *http.ServeMux
 	pairMu  sync.Mutex
 	pairs   map[string]*pairSession
+	probeMu sync.Mutex
+	probe   *probeRun
 }
 
 // New 创建服务。

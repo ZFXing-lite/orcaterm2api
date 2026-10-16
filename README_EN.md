@@ -214,6 +214,10 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.6
+
+- Fix the upstream-models page refresh hanging: probing 17 models means 17 real upstream calls (minutes), and the old synchronous HTTP wait froze the frontend. Now it is a background task with 2s frontend polling — POST returns within 1ms, results stream in incrementally, you can switch tabs mid-probe (history re-renders on return); duplicate clicks reuse the running task; the stale-ticket preflight short-circuit stays
+
 ### v1.1.5
 
 **Model routing semantics fixed**: `upstream.force-model` default flipped from true to **false**

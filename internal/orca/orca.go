@@ -417,6 +417,9 @@ func isConsoleAuthExpired(msg string) bool {
 	return strings.Contains(msg, "NEED_UIN_AND_SKEY") || strings.Contains(msg, "VERIFY_SKEY_UIN_FAILED")
 }
 
+// IsConsoleAuthExpired 控制台态票据失效特征判断（导出版，供面板/探测层使用）。
+func IsConsoleAuthExpired(msg string) bool { return isConsoleAuthExpired(msg) }
+
 // ProtocolError 上游协议错误。
 type ProtocolError struct{ Msg string }
 
