@@ -216,6 +216,15 @@ go test -race ./...
 
 ## 更新日志
 
+### v1.1.5
+
+**模型路由语义修正**：`upstream.force-model` 默认值由 true 改为 **false**
+
+- 此前默认会把所有下游请求强制改写到 `default-model`（deepseek-v4-flash）——你在客户端换模型其实没换
+- 现在默认**跟随下游**：客户端请求什么模型，上游就走什么（`glm-5.3` → `TokenHub/glm-5.3`，`kimi-k3` → `TokenHub/kimi-k3`，已实测断言上游收到的 setting.model 逐一切换）
+- 需要统一出口时再开 `force-model: true`（面板「强制默认模型」开关同义），开启后全部改写为 default-model——两种语义均经端到端验证
+- 注意：旧部署的 config.yaml / 面板里若保存过 `force-model: true` 显式值，升级后不会自动翻转，请自行关闭
+
 ### v1.1.4
 
 **无人值守模式（默认开，`upstream.no-ask`）**

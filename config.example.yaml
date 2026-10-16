@@ -11,7 +11,7 @@ upstream:
   origin: "http://tauri.localhost"
   user-agent: ""                    # 留空=使用内置 OrcaTerm 客户端 UA
   default-model: "deepseek-v4-flash" # 18 个可用模型见 README
-  force-model: true                 # 把请求体的 model 改写为 default-model
+  force-model: false                 # false=下游选什么模型，上游就走什么；true=所有请求强制走 default-model
   allow-unknown-model: false        # 是否允许未知模型名直通上游
   timeout: 300s
   hide-tools: true                  # hideToolMessage 等三个上游开关

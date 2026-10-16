@@ -101,7 +101,7 @@ func Defaults() *Config {
 			Origin:            "http://tauri.localhost",
 			UserAgent:         "",
 			DefaultModel:      "deepseek-v4-flash",
-			ForceModel:        true,
+			ForceModel:        false, // 默认跟随下游选择的模型；需要统一出口时再显式开启
 			AllowUnknownModel: false,
 			Timeout:           "300s",
 			HideTools:         true,

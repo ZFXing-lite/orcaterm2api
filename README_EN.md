@@ -214,6 +214,15 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.5
+
+**Model routing semantics fixed**: `upstream.force-model` default flipped from true to **false**
+
+- Previously every downstream request was silently rewritten to `default-model` (deepseek-v4-flash) — switching models in your client changed nothing
+- Now the gateway follows the client by default: request `glm-5.3` and the upstream receives `TokenHub/glm-5.3`; verified end-to-end that the upstream setting.model switches per request
+- Set `force-model: true` (panel toggle "force default model") when you want a single unified outlet — both directions verified
+- Note: deployments that saved an explicit `force-model: true` in config.yaml or via the panel keep that value; flip it manually
+
 ### v1.1.4
 
 **Unattended mode (on by default, `upstream.no-ask`)**

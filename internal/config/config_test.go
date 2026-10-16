@@ -35,7 +35,7 @@ func TestParseExample(t *testing.T) {
 	if len(c.Upstream.Keys) != 1 || c.Upstream.Keys[0].Name != "号1" {
 		t.Errorf("keys=%+v", c.Upstream.Keys)
 	}
-	if !c.Upstream.ForceModel || c.RateLimit.DisableOnAuthError != true {
+	if c.Upstream.ForceModel || c.RateLimit.DisableOnAuthError != true {
 		t.Errorf("bool 字段解析异常")
 	}
 }
