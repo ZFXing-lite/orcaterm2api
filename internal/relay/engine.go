@@ -91,6 +91,35 @@ func newID(prefix string) string {
 
 // clientFor 取账号绑定的上游客户端（含代理）。
 // 缓存 key 覆盖全部构造参数，配置热重载后自动使用新 client。
+// NoAskBehaviorNote 无人值守行为指令：抑制上游默认的反问（ask）倾向。
+// 语义判断交给上游模型——用户明确要讨论时它仍可提问。
+const NoAskBehaviorNote = "【运行模式】你正处于无人值守模式：默认直接执行用户的任务并给出最终结果，不要反问用户、不要请求确认、不要要求用户补充信息（信息不足时自行做出合理假设并在结果开头简要说明所做假设）；仅当用户明确表示想讨论、征求意见或等待你确认时，才允许向用户提问。"
+
+// behaviorNote 按配置返回行为指令（空串=不注入）。
+func behaviorNote(snap config.Config) string {
+	if !snap.Upstream.NoAsk {
+		return ""
+	}
+	return NoAskBehaviorNote
+}
+
+// autoConfirmAsk 非流式兜底：上游仍然 ask 时自动回填一轮「直接执行」。
+// 仅一次；确认后仍 ask 则把问题原样交给下游（用户可看到并回答）。
+func (e *Engine) autoConfirmAsk(ctx context.Context, snap config.Config, acct *keypool.Account, oreq orca.ChatRequest, outcome *orca.Outcome) *orca.Outcome {
+	if outcome.Action != "ask" || !snap.Upstream.NoAsk {
+		return outcome
+	}
+	confirm := oreq
+	confirm.Text = "是的，请直接执行，无需再向我确认。"
+	confirm.Images = nil
+	confirm.BehaviorNote = behaviorNote(snap)
+	second, err := e.callOne(ctx, acct, confirm)
+	if err != nil || second == nil {
+		return outcome // 确认轮失败：退回原问题
+	}
+	return second
+}
+
 func (e *Engine) clientFor(a *keypool.Account) *orca.Client {
 	snap := e.cfg.Snapshot()
 	timeout := config.ParseDuration(snap.Upstream.Timeout, 300*time.Second)
@@ -175,10 +204,18 @@ func (e *Engine) sessionTurn(ctx context.Context, snap config.Config, req *ChatR
 		UpstreamModel:  upstreamModel,
 		HideTools:      snap.Upstream.HideTools,
 		EnableTools:    len(req.Tools) > 0,
+		BehaviorNote:   behaviorNote(snap),
 	})
 	if err != nil {
 		return nil, err
 	}
+	outcome = e.autoConfirmAsk(ctx, snap, acct, orca.ChatRequest{
+		ConversationID: convID,
+		UpstreamModel:  upstreamModel,
+		HideTools:      snap.Upstream.HideTools,
+		EnableTools:     len(req.Tools) > 0,
+		BehaviorNote:    behaviorNote(snap),
+	}, outcome)
 	resp := e.buildResponse(req, snap, outcome, acct.ID, upstreamModel, sessionKey, convID, unsupported, text)
 	e.track(acct.ID, modelName, resp.Usage, nil)
 	return resp, nil
@@ -198,13 +235,15 @@ func (e *Engine) pooledTurn(ctx context.Context, snap config.Config, req *ChatRe
 		UpstreamModel:  upstreamModel,
 		HideTools:      snap.Upstream.HideTools,
 		EnableTools:    len(req.Tools) > 0,
+		BehaviorNote:   behaviorNote(snap),
 	}
 	res, acct, err := e.pool.DoWithRetry(ctx, func(a *keypool.Account) (any, bool, int, error) {
-		out, uerr := e.clientFor(a).Chat(ctx, a.Credential(), oreq)
+		out, uerr := e.callOne(ctx, a, oreq)
 		if uerr != nil {
 			retryable, status, herr := e.retryableOf(uerr)
 			return nil, retryable, status, herr
 		}
+		out = e.autoConfirmAsk(ctx, snap, a, oreq, out)
 		return out, false, 200, nil
 	})
 	if err != nil {

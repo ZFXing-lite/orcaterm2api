@@ -96,6 +96,7 @@ func (e *Engine) buildOreq(snap config.Config, req *ChatRequest, text string, im
 		UpstreamModel:  upstreamModel,
 		HideTools:      snap.Upstream.HideTools,
 		EnableTools:    len(req.Tools) > 0,
+		BehaviorNote:   behaviorNote(snap), // 流式：字节已飞无法二次确认，只靠提示词抑制
 	}, nil
 }
 

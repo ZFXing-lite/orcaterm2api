@@ -214,6 +214,16 @@ go test -race ./...
 
 ## Changelog
 
+### v1.1.4
+
+**Unattended mode (on by default, `upstream.no-ask`)**
+
+- Fixes the upstream assistant's habit of asking back every turn: a behavior note is injected as the first prompt block — unattended, execute by default, make and state assumptions when info is missing; asking is allowed **only when the user explicitly wants to discuss or asks for your opinion** (semantic judgment delegated to the upstream model, no keyword filtering in the gateway)
+- Non-streaming requests add an auto-confirm fallback: if the upstream still asks, the gateway appends a "yes, execute" turn on the same conversation to get the final result; if it asks again the question is passed through verbatim
+- Streaming relies on the prompt note (bytes already flown), residual questions pass through as-is
+- New panel toggle: unattended (suppress upstream questions)
+- Hardening: the stream field extractor now skips empty fields (an empty taskCompletion no longer swallows the question), and protocol parsing tolerates leading chatter before the JSON
+
 ### v1.1.3
 
 - Fix a real-upstream parsing quirk: the upstream model habitually wraps the protocol JSON in a markdown fence (```json … ```), which broke aggregation with "invalid character '`' looking for beginning of value". The parser now strips fences and surrounding noise, and falls back to the outermost brace span; streaming was never affected (the fence sits before the field marker and is swallowed). Both modes verified end-to-end

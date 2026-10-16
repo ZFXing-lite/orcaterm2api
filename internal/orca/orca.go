@@ -237,7 +237,17 @@ type ImagePart struct {
 
 // BuildACPPrompt 构造上游 input.input 的 ACP 信封。
 func BuildACPPrompt(text string, images []ImagePart) string {
-	prompt := []map[string]any{{"type": "text", "text": text}}
+	return BuildACPPromptWithNote("", text, images)
+}
+
+// BuildACPPromptWithNote 在 prompt 数组最前注入行为指令块（上游把多块
+// prompt 视为同一轮输入，桌面客户端同样以首块注入环境指令）。
+func BuildACPPromptWithNote(note, text string, images []ImagePart) string {
+	var prompt []map[string]any
+	if strings.TrimSpace(note) != "" {
+		prompt = append(prompt, map[string]any{"type": "text", "text": note})
+	}
+	prompt = append(prompt, map[string]any{"type": "text", "text": text})
 	for _, img := range images {
 		if mime, data, ok := splitDataURI(img.URL); ok {
 			prompt = append(prompt, map[string]any{
@@ -305,7 +315,8 @@ type ChatRequest struct {
 	Images         []ImagePart
 	UpstreamModel  string
 	HideTools      bool
-	EnableTools    bool // setting.mcpServers/uiServers 开关（tools 列表恒为空）
+	EnableTools    bool   // setting.mcpServers/uiServers 开关（tools 列表恒为空）
+	BehaviorNote   string // 行为指令：注入 prompt 首块（无人值守/默认执行等）
 }
 
 // UpstreamTool 上游 data.tool。
@@ -353,10 +364,14 @@ func ParseOutcomeText(full string) (*Outcome, error) {
 	if out, err := parseOutcome([]byte(t)); err == nil {
 		return out, nil
 	}
-	// 形态二：内层协议 JSON——取最外层 {...} 跨度包信封（对围栏/前后噪声免疫）
+	// 形态二：前置噪声防御——取最外层 {...} 跨度（模型可能先说话再给 JSON）
 	body := outermostJSON(t)
 	if body == "" {
 		body = t
+	}
+	// 跨度本身可能是完整信封（噪声在围栏外），直接解
+	if out, err := parseOutcome([]byte(body)); err == nil {
+		return out, nil
 	}
 	wrapped := []byte(`{"code":0,"data":` + body + `}`)
 	if out, err := parseOutcome(wrapped); err == nil {
@@ -761,7 +776,7 @@ func (c *Client) buildBodyStream(req ChatRequest, userID string, stream bool) ([
 		},
 		"input": map[string]any{
 			"type":           "start",
-			"input":          BuildACPPrompt(req.Text, req.Images),
+			"input":          BuildACPPromptWithNote(req.BehaviorNote, req.Text, req.Images),
 			"id":             newUUID(),
 			"emphasisPrompt": "",
 			"files":          []any{},
@@ -929,12 +944,19 @@ func (x *StreamFieldExtractor) feed(token string) string {
 		x.pending.WriteString(token)
 		buf := x.pending.String()
 		for _, m := range x.markers {
-			if i := strings.Index(buf, m); i >= 0 {
-				x.state = 1
-				rest := buf[i+len(m):]
-				x.pending.Reset()
-				return x.emitUnescaped(rest)
+			i := strings.Index(buf, m)
+			if i < 0 {
+				continue
 			}
+			rest := buf[i+len(m):]
+			if strings.HasPrefix(rest, `"`) {
+				// 空值字段（如 ask 响应里的 "taskCompletion":""）：
+				// 跳过它继续找真正有内容的标记（question）
+				continue
+			}
+			x.state = 1
+			x.pending.Reset()
+			return x.emitUnescaped(rest)
 		}
 		// 未命中：保留「最长标记-1」的尾部，防标记跨 token 劈开
 		keep := 0

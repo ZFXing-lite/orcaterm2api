@@ -50,6 +50,7 @@ type UpstreamConfig struct {
 	AllowUnknownModel bool            `json:"allow-unknown-model"`
 	Timeout           string          `json:"timeout"`
 	HideTools         bool            `json:"hide-tools"`
+	NoAsk             bool            `json:"no-ask"` // 默认开：注入「无人值守，默认执行」行为指令 + ask 自动确认
 	MaxToolRounds     int             `json:"max-tool-rounds"`
 	Keys              []AccountConfig `json:"keys"`
 }
@@ -104,6 +105,7 @@ func Defaults() *Config {
 			AllowUnknownModel: false,
 			Timeout:           "300s",
 			HideTools:         true,
+			NoAsk:             true,
 			MaxToolRounds:     8,
 			Keys:              []AccountConfig{},
 		},
@@ -272,6 +274,7 @@ func (c *Config) applyMap(m map[string]any) {
 	c.Upstream.AllowUnknownModel = boolean(u, "allow-unknown-model", c.Upstream.AllowUnknownModel)
 	c.Upstream.Timeout = str(u, "timeout", c.Upstream.Timeout)
 	c.Upstream.HideTools = boolean(u, "hide-tools", c.Upstream.HideTools)
+	c.Upstream.NoAsk = boolean(u, "no-ask", c.Upstream.NoAsk)
 	c.Upstream.MaxToolRounds = integer(u, "max-tool-rounds", c.Upstream.MaxToolRounds)
 	if kv, ok := u["keys"]; ok && kv != nil {
 		if arr, ok := kv.([]any); ok {
@@ -462,6 +465,7 @@ func (c *Config) render() string {
 	fmt.Fprintf(&b, "  allow-unknown-model: %v\n", c.Upstream.AllowUnknownModel)
 	fmt.Fprintf(&b, "  timeout: %s\n", yamlStr(c.Upstream.Timeout))
 	fmt.Fprintf(&b, "  hide-tools: %v\n", c.Upstream.HideTools)
+	fmt.Fprintf(&b, "  no-ask: %v\n", c.Upstream.NoAsk)
 	fmt.Fprintf(&b, "  max-tool-rounds: %d\n", c.Upstream.MaxToolRounds)
 	b.WriteString("  keys:\n")
 	for _, k := range c.Upstream.Keys {

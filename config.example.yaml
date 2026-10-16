@@ -15,6 +15,7 @@ upstream:
   allow-unknown-model: false        # 是否允许未知模型名直通上游
   timeout: 300s
   hide-tools: true                  # hideToolMessage 等三个上游开关
+  no-ask: true                      # 无人值守：注入「默认直接执行」行为指令 + 上游仍反问时自动确认一轮；仅用户明确要讨论时上游可提问
   max-tool-rounds: 8                # 工具调用最大往返轮数
   keys:
     - name: "号1"

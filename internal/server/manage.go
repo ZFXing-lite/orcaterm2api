@@ -364,6 +364,7 @@ func (s *Server) mgmtGetSettings(w http.ResponseWriter, r *http.Request) {
 		"allow_unknown":     snap.Upstream.AllowUnknownModel,
 		"timeout":           snap.Upstream.Timeout,
 		"hide_tools":        snap.Upstream.HideTools,
+		"no_ask":            snap.Upstream.NoAsk,
 		"max_tool_rounds":   snap.Upstream.MaxToolRounds,
 		"proxy_policy":      snap.Proxy.Policy,
 		"max_in_flight":     snap.RateLimit.MaxInFlight,
@@ -419,6 +420,9 @@ func (s *Server) mgmtUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := boolean("hide_tools"); ok {
 			c.Upstream.HideTools = v
+		}
+		if v, ok := boolean("no_ask"); ok {
+			c.Upstream.NoAsk = v
 		}
 		if v, ok := num("max_tool_rounds"); ok && v > 0 {
 			c.Upstream.MaxToolRounds = v

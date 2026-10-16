@@ -277,6 +277,7 @@ async function renderSettings(){
   // 中文标签映射：字段名（英文键与保存逻辑保持一致，仅展示层中文化）
   const ZH = {base_url:'上游地址', default_model:'默认模型', timeout:'上游超时',
     force_model:'强制默认模型', allow_unknown:'允许未知模型直通', hide_tools:'隐藏工具消息',
+    no_ask:'无人值守（抑制上游反问）',
     max_tool_rounds:'工具最大轮数', proxy_policy:'代理策略', max_in_flight:'单账号最大并发',
     cooldown_429:'429 冷却时长', cooldown_5xx:'5xx 冷却时长', max_retries:'跨号重试次数',
     session_ttl:'会话粘性时长', allow_remote:'允许远程管理'};
@@ -285,7 +286,7 @@ async function renderSettings(){
   document.getElementById('content').innerHTML=`
   <div class="card"><h3>网关设置 <span class="small">保存后立即生效并回写 config.yaml</span></h3>
   <div class="row">${f('base_url',j.base_url)}${f('default_model',j.default_model)}${f('timeout',j.timeout)}</div>
-  <div class="row mt">${c('force_model',j.force_model)}${c('allow_unknown',j.allow_unknown)}${c('hide_tools',j.hide_tools)}</div>
+  <div class="row mt">${c('force_model',j.force_model)}${c('allow_unknown',j.allow_unknown)}${c('hide_tools',j.hide_tools)}${c('no_ask',j.no_ask)}</div>
   <div class="row mt">${f('max_tool_rounds',j.max_tool_rounds)}${f('proxy_policy',j.proxy_policy)}${f('max_in_flight',j.max_in_flight)}</div>
   <div class="row mt">${f('cooldown_429',j.cooldown_429)}${f('cooldown_5xx',j.cooldown_5xx)}${f('max_retries',j.max_retries)}</div>
   <div class="row mt">${f('session_ttl',j.session_ttl)}${c('allow_remote',j.allow_remote)}<div><label>面板密码（留空=不修改）</label><input id="s_secret_key" type="password" placeholder="不修改"></div></div>

@@ -279,3 +279,45 @@ func TestParseOutcomeTextRejectsGarbage(t *testing.T) {
 		t.Error("非 JSON 内容应报协议错误")
 	}
 }
+
+func TestBuildACPPromptWithNote(t *testing.T) {
+	// 行为指令注入 prompt 首块；无指令时保持原形态
+	out := BuildACPPromptWithNote("无人值守指令", "你好", nil)
+	// map 键序列化按字母序，断言按位置序：指令文本必须出现在用户输入之前
+	if strings.Index(out, "无人值守指令") > strings.Index(out, "你好") {
+		t.Errorf("指令块应位于用户输入之前: %s", out)
+	}
+	if !strings.Contains(out, `"text":"你好"`) {
+		t.Errorf("用户输入应保留: %s", out)
+	}
+	plain := BuildACPPrompt("你好", nil)
+	if strings.Contains(plain, "无人值守") {
+		t.Error("无指令时不应有额外块")
+	}
+}
+
+func TestParseOutcomeTextLeadingNoise(t *testing.T) {
+	// 真实加固场景：模型先说话再给围栏 JSON（前置噪声 + 噪声内含信封）
+	in := "好的，这是执行结果：```json\n{\"code\":0,\"data\":{\"action\":\"completion\",\"taskCompletion\":\"最终文本\"}}\n```"
+	out, err := ParseOutcomeText(in)
+	if err != nil {
+		t.Fatalf("前置噪声场景: %v", err)
+	}
+	if out.Text != "最终文本" {
+		t.Errorf("文本提取错误: %q", out.Text)
+	}
+}
+
+func TestStreamFieldExtractorSkipsEmptyField(t *testing.T) {
+	// ask 响应：taskCompletion 空值在前、question 有内容在后——必须跳过空值提取 question
+	x := NewStreamFieldExtractor()
+	var out strings.Builder
+	for _, tok := range []string{
+		`{"code":0,"data":{"action":"ask","thinking":"","ta`, `skCompletion":"","question":"要继续吗"}`,
+	} {
+		out.WriteString(x.Feed(tok))
+	}
+	if out.String() != "要继续吗" {
+		t.Errorf("空值跳过失败: %q", out.String())
+	}
+}
